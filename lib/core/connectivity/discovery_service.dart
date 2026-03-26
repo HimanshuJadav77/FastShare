@@ -44,7 +44,7 @@ class DiscoveryOrchestrator {
   void stopDiscovery() {
     wifiService.stopDiscovery();
     _bluetoothService.stopDiscovery();
-    tcpServer.stop();
+    tcpServer.stop(forceCloseClients: false);
     debugPrint('[ORCHESTRATOR] Discovery stopped.');
   }
 }

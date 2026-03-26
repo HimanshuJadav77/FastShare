@@ -1,25 +1,30 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
+/// Premium iOS-style Theme Extension for "Anti-Gravity" effects
 class AppThemeExtension extends ThemeExtension<AppThemeExtension> {
   final Color success;
   final Color danger;
   final Color warning;
   final Color glassBackground;
+  final List<BoxShadow> antiGravityShadow;
+  final Color textMuted;
+  final Gradient primaryGradient;
   final Color cardShadow;
   final Color connectionActive;
   final Color connectionInactive;
-  final Color textMuted;
 
   const AppThemeExtension({
     required this.success,
     required this.danger,
     required this.warning,
     required this.glassBackground,
+    required this.antiGravityShadow,
+    required this.textMuted,
+    required this.primaryGradient,
     required this.cardShadow,
     required this.connectionActive,
     required this.connectionInactive,
-    required this.textMuted,
   });
 
   @override
@@ -28,20 +33,24 @@ class AppThemeExtension extends ThemeExtension<AppThemeExtension> {
     Color? danger,
     Color? warning,
     Color? glassBackground,
+    List<BoxShadow>? antiGravityShadow,
+    Color? textMuted,
+    Gradient? primaryGradient,
     Color? cardShadow,
     Color? connectionActive,
     Color? connectionInactive,
-    Color? textMuted,
   }) {
     return AppThemeExtension(
       success: success ?? this.success,
       danger: danger ?? this.danger,
       warning: warning ?? this.warning,
       glassBackground: glassBackground ?? this.glassBackground,
+      antiGravityShadow: antiGravityShadow ?? this.antiGravityShadow,
+      textMuted: textMuted ?? this.textMuted,
+      primaryGradient: primaryGradient ?? this.primaryGradient,
       cardShadow: cardShadow ?? this.cardShadow,
       connectionActive: connectionActive ?? this.connectionActive,
       connectionInactive: connectionInactive ?? this.connectionInactive,
-      textMuted: textMuted ?? this.textMuted,
     );
   }
 
@@ -49,49 +58,51 @@ class AppThemeExtension extends ThemeExtension<AppThemeExtension> {
   AppThemeExtension lerp(ThemeExtension<AppThemeExtension>? other, double t) {
     if (other is! AppThemeExtension) return this;
     return AppThemeExtension(
-      success: Color.lerp(success, other.success, t)!,
-      danger: Color.lerp(danger, other.danger, t)!,
-      warning: Color.lerp(warning, other.warning, t)!,
-      glassBackground: Color.lerp(glassBackground, other.glassBackground, t)!,
-      cardShadow: Color.lerp(cardShadow, other.cardShadow, t)!,
-      connectionActive: Color.lerp(connectionActive, other.connectionActive, t)!,
-      connectionInactive: Color.lerp(connectionInactive, other.connectionInactive, t)!,
-      textMuted: Color.lerp(textMuted, other.textMuted, t)!,
+      success: Color.lerp(success, other.success, t) ?? success,
+      danger: Color.lerp(danger, other.danger, t) ?? danger,
+      warning: Color.lerp(warning, other.warning, t) ?? warning,
+      glassBackground: Color.lerp(glassBackground, other.glassBackground, t) ?? glassBackground,
+      antiGravityShadow: antiGravityShadow,
+      textMuted: Color.lerp(textMuted, other.textMuted, t) ?? textMuted,
+      primaryGradient: Gradient.lerp(primaryGradient, other.primaryGradient, t) ?? primaryGradient,
+      cardShadow: Color.lerp(cardShadow, other.cardShadow, t) ?? cardShadow,
+      connectionActive: Color.lerp(connectionActive, other.connectionActive, t) ?? connectionActive,
+      connectionInactive: Color.lerp(connectionInactive, other.connectionInactive, t) ?? connectionInactive,
     );
   }
 }
 
 class AppTheme {
-  static const Color _primaryBlue = Color(0xFF007AFF);
-  static const Color _darkBackground = Color(0xFF0A0A0A);
-  static const Color _lightBackground = Color(0xFFF9FAFB);
-
-  static final TextTheme _textTheme = GoogleFonts.interTextTheme();
+  // iOS 18 Primary Colors
+  static const Color _iosBlue = Color(0xFF007AFF);
+  static const Color _iosIndigo = Color(0xFF5856D6);
+  static const Color _darkBackground = Color(0xFF000000); // True Black for OLED
+  static const Color _lightBackground = Color(0xFFF2F2F7); // iOS Light Gray
 
   static ThemeData get light {
     return ThemeData(
+      useMaterial3: true,
       brightness: Brightness.light,
-      primaryColor: _primaryBlue,
+      primaryColor: _iosBlue,
       scaffoldBackgroundColor: _lightBackground,
       colorScheme: const ColorScheme.light(
-        primary: _primaryBlue,
-        secondary: _primaryBlue,
+        primary: _iosBlue,
+        secondary: _iosIndigo,
         surface: Colors.white,
       ),
-      textTheme: _textTheme.apply(
-        bodyColor: const Color(0xFF111827),
-        displayColor: const Color(0xFF111827),
+      textTheme: GoogleFonts.interTextTheme().apply(
+        bodyColor: Colors.black,
+        displayColor: Colors.black,
       ),
-      appBarTheme: const AppBarTheme(
+      appBarTheme: AppBarTheme(
         backgroundColor: Colors.transparent,
         elevation: 0,
         centerTitle: true,
-        iconTheme: IconThemeData(color: Colors.black87),
-        titleTextStyle: TextStyle(
-          color: Colors.black87,
-          fontSize: 18,
-          fontWeight: FontWeight.w600,
-          fontFamily: 'Inter',
+        titleTextStyle: GoogleFonts.inter(
+          color: Colors.black,
+          fontSize: 20,
+          fontWeight: FontWeight.w900,
+          letterSpacing: -0.5,
         ),
       ),
       extensions: [
@@ -99,40 +110,55 @@ class AppTheme {
           success: const Color(0xFF34C759),
           danger: const Color(0xFFFF3B30),
           warning: const Color(0xFFFF9500),
-          glassBackground: Colors.white.withValues(alpha: 0.8),
-          cardShadow: Colors.black.withValues(alpha: 0.05),
+          glassBackground: Colors.white.withValues(alpha: 0.4),
+          antiGravityShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.03),
+              blurRadius: 30,
+              offset: const Offset(0, 15),
+            ),
+          ],
+          textMuted: const Color(0xFF8E8E93),
+          primaryGradient: const LinearGradient(
+            colors: [_iosBlue, _iosIndigo],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+          cardShadow: Colors.black.withValues(alpha: 0.03),
           connectionActive: const Color(0xFF34C759),
-          connectionInactive: const Color(0xFFFF3B30),
-          textMuted: const Color(0xFF6B7280),
+          connectionInactive: const Color(0xFF8E8E93),
         ),
       ],
     );
   }
 
   static ThemeData get dark {
+    final base = ThemeData.dark();
     return ThemeData(
+      useMaterial3: true,
       brightness: Brightness.dark,
-      primaryColor: _primaryBlue,
+      primaryColor: _iosBlue,
       scaffoldBackgroundColor: _darkBackground,
       colorScheme: const ColorScheme.dark(
-        primary: _primaryBlue,
-        secondary: _primaryBlue,
-        surface: Color(0xFF121212), // slightly lighter than background
+        primary: _iosBlue,
+        secondary: _iosIndigo,
+        surface: Color(0xFF1C1C1E),
+        onSurface: Colors.white,
+        onSurfaceVariant: Color(0xFF8E8E93),
       ),
-      textTheme: _textTheme.apply(
-        bodyColor: const Color(0xFFF9FAFB),
-        displayColor: const Color(0xFFF9FAFB),
+      textTheme: GoogleFonts.interTextTheme(base.textTheme).apply(
+        bodyColor: Colors.white,
+        displayColor: Colors.white,
       ),
-      appBarTheme: const AppBarTheme(
+      appBarTheme: AppBarTheme(
         backgroundColor: Colors.transparent,
         elevation: 0,
         centerTitle: true,
-        iconTheme: IconThemeData(color: Colors.white),
-        titleTextStyle: TextStyle(
+        titleTextStyle: GoogleFonts.inter(
           color: Colors.white,
-          fontSize: 18,
-          fontWeight: FontWeight.w600,
-          fontFamily: 'Inter',
+          fontSize: 20,
+          fontWeight: FontWeight.w900,
+          letterSpacing: -0.5,
         ),
       ),
       extensions: [
@@ -140,17 +166,30 @@ class AppTheme {
           success: const Color(0xFF30D158),
           danger: const Color(0xFFFF453A),
           warning: const Color(0xFFFF9F0A),
-          glassBackground: Colors.white.withValues(alpha: 0.05),
+          glassBackground: const Color(0xFF1C1C1E).withValues(alpha: 0.4),
+          antiGravityShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.3),
+              blurRadius: 30,
+              offset: const Offset(0, 15),
+            ),
+          ],
+          textMuted: const Color(0xFF8E8E93),
+          primaryGradient: const LinearGradient(
+            colors: [_iosBlue, _iosIndigo],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
           cardShadow: Colors.transparent,
           connectionActive: const Color(0xFF30D158),
-          connectionInactive: const Color(0xFFFF453A),
-          textMuted: const Color(0xFF9CA3AF),
+          connectionInactive: const Color(0xFF8E8E93),
         ),
       ],
     );
   }
 }
 
-extension AppThemeExtensionX on BuildContext {
+extension AppThemeX on BuildContext {
   AppThemeExtension get appColors => Theme.of(this).extension<AppThemeExtension>()!;
+  TextTheme get text => Theme.of(this).textTheme;
 }

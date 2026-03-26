@@ -13,6 +13,10 @@ class TransferItem {
   bool isPaused;
   bool isCancelled;
 
+  /// If true, [localFile] is a temporary copy and should be deleted after
+  /// the transfer completes (used for cloud-provider files picked on Android).
+  final bool isTempFile;
+
   TransferItem({
     required this.id,
     required this.fileName, 
@@ -24,6 +28,7 @@ class TransferItem {
     this.localFile,
     this.isPaused = false,
     this.isCancelled = false,
+    this.isTempFile = false,
   });
 
   String get fileSizeFormatted {

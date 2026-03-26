@@ -4,25 +4,43 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:wifi_ftp/core/transfer/transfer_queue.dart';
 import 'package:wifi_ftp/core/transfer/transfer_history.dart';
 
-/// Handles actual file transfer over TCP.
+/// Handles high-performance file transfer by using parallel TCP streams.
 /// Protocol on data port 45557:
-///   1. Sender writes JSON header: {"type":"FILE_START","name":"foo.jpg","size":12345,"id":"uuid"}\n
-///   2. Sender streams raw bytes (exactly 'size' bytes)
-///   3. Repeat for next file
-///   4. Socket closes when done
+///   1. Header as JSON line: {"type":"CHUNK","id":"uuid","name":"file.ext","offset":0,"size":4096000}\n
+///   2. Payload: Exactly "size" bytes of raw binary.
+///   3. Streams: Up to 4 parallel sockets can contribute chunks to the same file.
 class FileTransferService {
   static final FileTransferService _instance = FileTransferService._internal();
   factory FileTransferService() => _instance;
   FileTransferService._internal();
 
   final int dataPort = 45557;
+  final int parallelStreams = 6;
+  final int chunkSize = 1024 * 1024 * 6; // 6MB Chunks for balanced speed
+
   ServerSocket? _dataServer;
   final TransferQueue _queue = TransferQueue();
   final TransferHistory _history = TransferHistory();
   bool _receiving = false;
+
+  /// Custom download path from settings
+  String? customDownloadPath;
+  
+  /// Whether to automatically resume partial transfers
+  bool autoResumeEnabled = true;
+
+  // Track active files on receiver to allow parallel writes
+  final Map<String, RandomAccessFile> _activeReceivingFiles = {};
+  final Map<String, int> _activeReceivedBytes = {};
+  final Map<String, int> _sessionStartBytes = {};
+  final Map<String, Stopwatch> _activeStopwatches = {};
+  final Map<String, String> _activeFileNames = {};
+  final Map<String, Future<void>> _writeLocks = {};
+  final Map<String, Future<void>> _initLocks = {};
 
   /// Global navigator key for completion popups — shared with AppConnection
   static GlobalKey<NavigatorState>? navigatorKey;
@@ -33,620 +51,407 @@ class FileTransferService {
   // ─── RECEIVER SIDE ───
 
   Future<void> startReceiver() async {
-    if (_dataServer != null) {
-      debugPrint('[FILE-RX] Already listening.');
-      return;
-    }
+    if (_dataServer != null) return;
     try {
       _dataServer = await ServerSocket.bind(InternetAddress.anyIPv4, dataPort);
       _receiving = true;
-
-      _dataServer!.listen((Socket client) {
-        _handleIncomingDataSocket(client);
-      });
+      _dataServer!.listen(_handleIncomingDataSocket);
     } catch (e) {
-      debugPrint('[FILE-RX] Failed to bind server socket: $e');
+      debugPrint('[FILE-RX] Bind error: $e');
     }
   }
 
   void _handleIncomingDataSocket(Socket socket) {
+    socket.setOption(SocketOption.tcpNoDelay, true);
     final chunks = <Uint8List>[];
     int bufferLength = 0;
 
     String? currentFileId;
-    String? currentFileName;
-    int currentFileSize = 0;
-    int currentFileIndex = 0;
-    int currentFileTotal = 1;
-    int bytesReceived = 0;
-    RandomAccessFile? raf;
-    Stopwatch? sw;
-    String? currentFilePath;
-    late StreamSubscription<Uint8List> sub;
-    bool isProcessing = false;
+    int currentChunkSize = 0;
+    int currentOffset = 0;
+    int currentChunkReceived = 0;
 
-    socket.setOption(SocketOption.tcpNoDelay, true);
+    StreamSubscription<Uint8List>? sub;
+    bool isProcessing = false;
 
     Future<void> processQueue() async {
       if (isProcessing) return;
       isProcessing = true;
-
       try {
         while (chunks.isNotEmpty) {
-          // ─── STATE: RECEIVING FILE BYTES ───
-          if (currentFileId != null && raf != null) {
+          if (currentFileId != null && currentChunkSize > 0) {
+            // RECEIVING PAYLOAD
             final data = chunks.first;
-            final remainingForFile = currentFileSize - bytesReceived;
+            final remaining = currentChunkSize - currentChunkReceived;
+            final toWrite = data.length <= remaining ? data.length : remaining;
 
-            if (remainingForFile <= 0) {
-              debugPrint('[FILE-RX] Out of sync state detected. Aborting.');
-              if (currentFileId != null) _queue.failItem(currentFileId!);
-              socket.destroy();
-              return;
+            final raf = _activeReceivingFiles[currentFileId];
+            if (raf != null) {
+              final fileId = currentFileId!;
+              final writeOffset = currentOffset + currentChunkReceived;
+
+              // Serialize writes to this file to avoid "async operation pending"
+              _writeLocks[fileId] = (_writeLocks[fileId] ?? Future.value())
+                  .then((_) async {
+                    await raf.setPosition(writeOffset);
+                    // Zero-copy write using range
+                    await raf.writeFrom(data, 0, toWrite);
+                  });
+
+              // IMPORTANT: Don't await here! Allow the network to keep reading into the
+              // processQueue buffer (limited to 16MB by sub?.pause()).
+              // This decouples Wi-Fi speed from Disk speed.
             }
 
-            if (data.length <= remainingForFile) {
-              await raf!.writeFrom(data);
-              bytesReceived += data.length;
+            currentChunkReceived += toWrite;
+            _activeReceivedBytes[currentFileId!] =
+                (_activeReceivedBytes[currentFileId] ?? 0) + toWrite;
+
+            if (data.length <= remaining) {
               chunks.removeAt(0);
               bufferLength -= data.length;
             } else {
-              // Chunk contains end of this file AND start of next header/file
-              await raf!.writeFrom(data, 0, remainingForFile);
-              bytesReceived += remainingForFile;
-
-              final leftover = data.sublist(remainingForFile);
-              chunks[0] = leftover;
-              bufferLength -= remainingForFile;
+              chunks[0] = data.sublist(toWrite);
+              bufferLength -= toWrite;
             }
 
-            // 1. ALWAYS handle backpressure independently of the UI
-            // This prevents the stream from permanently deadlocking
-            if (sub.isPaused && bufferLength < 1024 * 1024 * 4) {
-              sub.resume();
-            }
+            // Progress: Use sliding window-like logic or at least total average
+            final totalReceived = _activeReceivedBytes[currentFileId!] ?? 0;
+            final sw = _activeStopwatches[currentFileId!];
 
-            // 2. Throttle UI updates so we don't choke the Android Choreographer
-            if (bytesReceived % (1024 * 1024 * 2) < data.length ||
-                bytesReceived >= currentFileSize) {
+            // Update UI every 12MB or completion
+            if (totalReceived % (12 * 1024 * 1024) < toWrite ||
+                currentChunkReceived >= currentChunkSize) {
               final elapsed = (sw?.elapsedMilliseconds ?? 0) / 1000.0;
-              final speed = elapsed > 0 ? bytesReceived / elapsed : 0.0;
-              try {
-                _queue.updateProgress(
-                  currentFileId!,
-                  bytesReceived / currentFileSize,
-                  speed,
-                );
-              } catch (_) {}
-
-              // Yield to UI Thread
-              await Future.delayed(const Duration(milliseconds: 1));
-            }
-
-            // ─── HANDLE FILE COMPLETION ───
-            if (bytesReceived >= currentFileSize) {
-              final isLastFile = currentFileIndex + 1 >= currentFileTotal;
-
-              VoidCallback? dismissLoading;
-              if (isLastFile) {
-                dismissLoading = _showLoadingPopup('Saving to device...');
-              }
-
-              // Do the heavy lifting (Disk write)
-              await raf!.flush();
-              await raf!.close();
-              raf = null;
-
-              // Send an ACK back to the Sender over the data socket
-              try {
-                socket.write('ACK\n');
-                await socket.flush();
-              } catch (e) {
-                debugPrint('[FILE-RX] Failed to send ACK: $e');
-              }
-
-              _queue.completeItem(currentFileId!);
-              debugPrint('[FILE-RX] Complete: $currentFileName');
-
-              await _history.addRecord(
-                TransferRecord(
-                  fileName: currentFileName!,
-                  fileSize: currentFileSize,
-                  direction: 'received',
-                  deviceName: connectedDeviceName,
-                  timestamp: DateTime.now(),
-                  filePath: currentFilePath,
+              // For a more 'instant' feel, we could track the last 2 seconds,
+              // but let's stick to total average for now to ensure consistency
+              // Calculate speed based on the bytes received IN THIS SESSION
+              final bytesInSession = totalReceived - (_sessionStartBytes[currentFileId] ?? 0);
+              final speed = elapsed > 0 ? bytesInSession / elapsed : 0.0;
+              
+              // We'll trust the queue items list for total size
+              final item = _queue.items.firstWhere(
+                (i) => i.id == currentFileId,
+                orElse: () => TransferItem(
+                  id: 'dummy',
+                  fileName: '',
+                  fileSize: 1,
+                  direction: TransferDirection.receiving,
+                  status: TransferItemStatus.transferring,
+                  localFile: File(''),
                 ),
               );
-
-              // Dismiss the loading overlay
-              dismissLoading?.call();
-
-              // Show the final success popup
-              if (isLastFile) {
-                _showCompletionPopup(
-                  currentFileTotal > 1
-                      ? '$currentFileTotal files'
-                      : currentFileName!,
-                  'received',
+              if (item.id != 'dummy') {
+                _queue.updateProgress(
+                  currentFileId!,
+                  totalReceived / item.fileSize,
+                  speed,
                 );
               }
+            }
 
+            final String lastFileId = currentFileId!;
+            if (currentChunkReceived >= currentChunkSize) {
               currentFileId = null;
-              currentFileName = null;
-              bytesReceived = 0;
-              // Small yield before next file header parsing
-              await Future.delayed(const Duration(milliseconds: 2));
+              currentChunkSize = 0;
             }
-          }
-          // ─── STATE: PARSING HEADER ───
-          else {
-            final builder = BytesBuilder(copy: false);
-            // Copy list for safe iteration
-            final snap = List<Uint8List>.from(chunks);
-            for (var c in snap) {
-              builder.add(c);
+
+            // ─── FILE COMPLETE CHECK ───
+            final item = _queue.items.firstWhere(
+              (i) => i.id == lastFileId,
+              orElse: () => TransferItem(
+                id: 'dummy',
+                fileName: '',
+                fileSize: 1,
+                direction: TransferDirection.receiving,
+                status: TransferItemStatus.transferring,
+                localFile: File(''),
+              ),
+            );
+            if (item.id != 'dummy' &&
+                totalReceived >= item.fileSize &&
+                _activeReceivingFiles.containsKey(item.id)) {
+              // Wait for ALL pending writes in the chain to finish before closing
+              await (_writeLocks[item.id] ?? Future.value());
+
+              final raf = _activeReceivingFiles.remove(item.id);
+              if (raf != null) {
+                await raf.flush();
+                await raf.close();
+                final name = _activeFileNames.remove(item.id) ?? 'File';
+                _activeReceivedBytes.remove(item.id);
+                _activeStopwatches.remove(item.id);
+                _writeLocks.remove(item.id);
+                _queue.completeItem(item.id);
+
+                await _history.addRecord(
+                  TransferRecord(
+                    fileName: name,
+                    fileSize: item.fileSize,
+                    direction: 'received',
+                    deviceName: connectedDeviceName,
+                    timestamp: DateTime.now(),
+                  ),
+                );
+              }
             }
-            final flat = builder.takeBytes();
-            final nl = flat.indexOf(10); // \n
-
-            if (nl != -1) {
-              final headerBytes = flat.sublist(0, nl);
-              final remainingData = flat.sublist(nl + 1);
-
-              String line;
-              try {
-                line = utf8.decode(headerBytes).trim();
-              } catch (e) {
-                debugPrint('[FILE-RX] Header Decode failed: $e. Aborting.');
-                if (currentFileId != null) _queue.failItem(currentFileId!);
-                socket.destroy();
-                return;
+          } else {
+            // PARSING HEADER
+            // Efficiently find newline without expanding all chunks
+            int nl = -1;
+            int accumulated = 0;
+            for (final chunk in chunks) {
+              final idx = chunk.indexOf(10);
+              if (idx != -1) {
+                nl = accumulated + idx;
+                break;
               }
+              accumulated += chunk.length;
+            }
+            if (nl == -1) break;
 
-              chunks.clear();
-              bufferLength = 0;
-              if (remainingData.isNotEmpty) {
-                chunks.add(remainingData);
-                bufferLength = remainingData.length;
+            final headerBytes = Uint8List(nl);
+            int currentCopyOffset = 0;
+            for (final chunk in chunks) {
+              final bytesToCopy = (nl - currentCopyOffset).clamp(
+                0,
+                chunk.length,
+              );
+              headerBytes.setRange(
+                currentCopyOffset,
+                currentCopyOffset + bytesToCopy,
+                chunk,
+              );
+              currentCopyOffset += bytesToCopy;
+              if (currentCopyOffset >= nl) break;
+            }
+            final headerStr = utf8.decode(headerBytes);
+
+            // Consume header from chunks
+            int toConsume = nl + 1;
+            while (toConsume > 0 && chunks.isNotEmpty) {
+              if (chunks.first.length <= toConsume) {
+                toConsume -= chunks.first.length;
+                bufferLength -= chunks.first.length;
+                chunks.removeAt(0);
+              } else {
+                chunks[0] = chunks.first.sublist(toConsume);
+                bufferLength -= toConsume;
+                toConsume = 0;
               }
+            }
 
-              if (line.isNotEmpty) {
-                try {
-                  final json = jsonDecode(line) as Map<String, dynamic>;
-                  if (json['type'] == 'FILE_START') {
-                    currentFileId = json['id'];
-                    currentFileName = json['name'];
-                    currentFileSize = json['size'];
-                    currentFileIndex = json['index'];
-                    currentFileTotal = json['total'];
-                    bytesReceived = 0;
+            try {
+              final header = jsonDecode(headerStr);
+              if (header['type'] == 'CHUNK') {
+                currentFileId = header['id'];
+                currentChunkSize = header['size'];
+                currentOffset = header['offset'];
+                currentChunkReceived = 0;
 
-                    final res = await _openReceiveFile(currentFileName!);
-                    raf = res.$1;
-                    currentFilePath = res.$2;
+                if (!_activeReceivingFiles.containsKey(currentFileId)) {
+                  final String id = currentFileId!;
+                  _initLocks[id] = (_initLocks[id] ?? Future.value()).then((_) async {
+                    // Re-check after gaining the lock
+                    if (!_activeReceivingFiles.containsKey(id)) {
+                      Directory? downloadDir;
+                      if (customDownloadPath != null && customDownloadPath!.isNotEmpty) {
+                        downloadDir = Directory(customDownloadPath!);
+                      } else {
+                        if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
+                          downloadDir = await getDownloadsDirectory();
+                        }
+                        downloadDir ??= await getApplicationDocumentsDirectory();
+                      }
+                      
+                      final fastShareDir = customDownloadPath != null ? downloadDir : Directory('${downloadDir.path}/FastShare');
+                      if (!await fastShareDir.exists()) {
+                        await fastShareDir.create(recursive: true);
+                      }
 
-                    _queue.addItem(
-                      TransferItem(
-                        id: currentFileId!,
-                        fileName: currentFileName!,
-                        fileSize: currentFileSize,
-                        direction: TransferDirection.receiving,
-                        status: TransferItemStatus.transferring,
-                        localFile: File(currentFilePath!),
-                      ),
-                    );
-                    debugPrint('[FILE-RX] Started: $currentFileName');
-                    sw = Stopwatch()..start();
-                  }
-                } catch (e) {
-                  debugPrint('[FILE-RX] JSON Start error: $e');
+                      final path = '${fastShareDir.path}/${header['name']}';
+                      final file = File(path);
+                      
+                      // RESUME SUPPORT: Strictly follow the Sender's offset IF enabled
+                      final int senderOffset = header['offset'] ?? 0;
+                      final bool exists = await file.exists();
+                      
+                      if (senderOffset == 0 || !autoResumeEnabled) {
+                        // NEW TRANSFER or Resume Disabled: Always start fresh!
+                        if (exists) await file.delete();
+                        _activeReceivingFiles[id] = await file.open(mode: FileMode.write);
+                        _activeReceivedBytes[id] = 0;
+                        _sessionStartBytes[id] = 0;
+                      } else {
+                        // RESUME: Append to what we already have
+                        _activeReceivingFiles[id] = await file.open(
+                          mode: exists ? FileMode.append : FileMode.write,
+                        );
+                        final currentOnDisk = exists ? await file.length() : 0;
+                        _activeReceivedBytes[id] = currentOnDisk;
+                        _sessionStartBytes[id] = currentOnDisk;
+                      }
+
+                      _activeStopwatches[id] = Stopwatch()..start();
+                      _activeFileNames[id] = header['name'];
+
+                      // ─── ADD TO UI QUEUE ───
+                      final existing = _queue.items.any((i) => i.id == id);
+                      if (!existing) {
+                        _queue.addItem(
+                          TransferItem(
+                            id: id,
+                            fileName: header['name'],
+                            fileSize: header['total'] ?? 0,
+                            direction: TransferDirection.receiving,
+                            status: TransferItemStatus.transferring,
+                            localFile: file,
+                          ),
+                        );
+                      }
+                    }
+                  });
+                  // Essential: Wait for initialization to finish before this socket
+                  // starts processing its payload, otherwise lines 80-96 will skip raf.
+                  await _initLocks[id];
                 }
+              } else if (header['type'] == 'FILE_END') {
+                // Now handled by size-check for parallel safety
               }
-            } else {
-              break; // Wait for more data to find \n
+            } catch (e) {
+              debugPrint('[FILE-RX] Parse error: $e');
+            }
+            if (sub != null && sub.isPaused && bufferLength < 1024 * 1024 * 8) {
+              sub.resume();
             }
           }
         }
-      } catch (e) {
-        debugPrint('[FILE-RX] Loop Error: $e. Aborting.');
-        if (currentFileId != null) _queue.failItem(currentFileId!);
-        socket.destroy();
-        return;
       } finally {
         isProcessing = false;
-        if (bufferLength > 0) processQueue();
       }
     }
 
-    sub = socket.listen(
-      (data) {
-        chunks.add(data);
-        bufferLength += data.length;
-        if (bufferLength > 1024 * 1024 * 12) sub.pause();
-        processQueue();
-      },
-      onDone: () async {
-        debugPrint('[FILE-RX] Socket closed. Draining...');
-        // Wait for processing to finish
-        int retry = 0;
-        while ((bufferLength > 0 || isProcessing) && retry < 50) {
-          if (!isProcessing) processQueue();
-          await Future.delayed(const Duration(milliseconds: 50));
-          retry++;
-        }
-
-        if (raf != null) {
-          try {
-            await raf!.flush();
-            await raf!.close();
-          } catch (_) {}
-          raf = null;
-        }
-
-        if (currentFileId != null && bytesReceived < currentFileSize) {
-          _queue.failItem(currentFileId!);
-        }
-        currentFileId = null;
-      },
-      onError: (e) async {
-        debugPrint('[FILE-RX] Socket Error: $e');
-        if (raf != null) {
-          try {
-            await raf!.close();
-          } catch (_) {}
-          raf = null;
-        }
-        if (currentFileId != null) _queue.failItem(currentFileId!);
-        currentFileId = null;
-      },
-      cancelOnError: true,
-    );
-  }
-
-  Future<(RandomAccessFile, String)> _openReceiveFile(String fileName) async {
-    String basePath;
-    if (Platform.isWindows) {
-      final userDir =
-          Platform.environment['USERPROFILE'] ?? 'C:\\Users\\Public';
-      basePath = '$userDir\\Downloads\\FastShare';
-    } else {
-      // Use the public Downloads folder so users can find the files easily in their File Manager
-      basePath = '/storage/emulated/0/Download/FastShare';
-    }
-
-    final directory = Directory(basePath);
-    if (!await directory.exists()) await directory.create(recursive: true);
-
-    final filePath = '$basePath${Platform.pathSeparator}$fileName';
-    final file = File(filePath);
-    if (await file.exists()) await file.delete();
-    await file.create();
-    return (await file.open(mode: FileMode.write), filePath);
+    sub = socket.listen((data) {
+      chunks.add(data);
+      bufferLength += data.length;
+      if (bufferLength > 1024 * 1024 * 16) sub?.pause();
+      processQueue();
+    });
   }
 
   // ─── SENDER SIDE ───
 
   Future<void> sendFiles(String peerIp, List<TransferItem> items) async {
-    Socket? dataSock;
-    Completer<void>? ackCompleter;
-
     final validItems = items
-        .where(
-          (i) =>
-              i.localFile != null && i.status != TransferItemStatus.completed,
-        )
+        .where((i) => i.status == TransferItemStatus.waiting)
         .toList();
-    debugPrint(
-      '[FILE-TX] sendFiles started for ${validItems.length} items to $peerIp',
-    );
     if (validItems.isEmpty) return;
 
-    for (int i = 0; i < validItems.length; i++) {
-      final item = validItems[i];
-      if (item.isCancelled) continue;
-
-      if (dataSock == null) {
-        try {
-          dataSock = await Socket.connect(peerIp, dataPort);
-          dataSock.setOption(SocketOption.tcpNoDelay, true);
-
-          // Listen to the socket for incoming ACKs from the Receiver
-          dataSock.listen(
-            (data) {
-              final msg = utf8.decode(data).trim();
-              if (msg.contains('ACK') &&
-                  ackCompleter != null &&
-                  !ackCompleter.isCompleted) {
-                ackCompleter.complete();
-              }
-            },
-            onError: (e) {
-              if (ackCompleter != null && !ackCompleter.isCompleted) {
-                ackCompleter.completeError(e);
-              }
-            },
-            onDone: () {
-              if (ackCompleter != null && !ackCompleter.isCompleted) {
-                ackCompleter.completeError('Socket closed early');
-              }
-            },
-          );
-        } catch (e) {
-          for (final i in validItems) {
-            try {
-              _queue.failItem(i.id);
-            } catch (_) {}
-          }
-          return;
-        }
+    // Open parallel sockets
+    final List<Socket> sockets = [];
+    try {
+      for (int i = 0; i < parallelStreams; i++) {
+        final s = await Socket.connect(peerIp, dataPort);
+        s.setOption(SocketOption.tcpNoDelay, true);
+        sockets.add(s);
       }
-
-      try {
-        final file = item.localFile!;
-        final fileSize = await file.length();
-
-        // Initialize the Completer BEFORE sending bytes
-        ackCompleter = Completer<void>();
-
-        // Send header
-        final header = jsonEncode({
-          'type': 'FILE_START',
-          'id': item.id,
-          'name': item.fileName,
-          'size': fileSize,
-          'index': i,
-          'total': validItems.length,
-        });
-        dataSock.write('$header\n');
-        await dataSock.flush();
-        debugPrint('[FILE-TX] Sending: ${item.fileName} ($fileSize bytes)');
-
-        // Stream file bytes
-        final raf = await file.open(mode: FileMode.read);
-        const chunkSize = 1048576 * 2; // 2MB chunks for maximum speed
-        int bytesSent = 0;
-        final sw = Stopwatch()..start();
-        bool wasCancelled = false;
-
-        while (bytesSent < fileSize) {
-          if (item.isCancelled) {
-            wasCancelled = true;
-            break;
-          }
-
-          if (item.isPaused) {
-            await Future.delayed(const Duration(milliseconds: 200));
-            continue;
-          }
-
-          final toRead = (bytesSent + chunkSize > fileSize)
-              ? fileSize - bytesSent
-              : chunkSize;
-          final chunk = await raf.read(toRead);
-          dataSock.add(chunk);
-          bytesSent += chunk.length;
-
-          // Update UI every 2MB, but only flush the OS socket buffer every 16MB
-          if (bytesSent % chunkSize == 0 || bytesSent >= fileSize) {
-            final elapsed = sw.elapsedMilliseconds / 1000.0;
-            final speed = elapsed > 0 ? bytesSent / elapsed : 0.0;
-            try {
-              _queue.updateProgress(item.id, bytesSent / fileSize, speed);
-            } catch (_) {}
-
-            if (bytesSent % (chunkSize * 8) == 0 || bytesSent >= fileSize) {
-              await dataSock.flush();
-            }
-          }
-        }
-
-        final isLastFile = i == validItems.length - 1;
-        VoidCallback? dismissLoading;
-
-        if (isLastFile && !wasCancelled) {
-          dismissLoading = _showLoadingPopup('Waiting for receiver to save...');
-        }
-
-        await dataSock.flush();
-        await raf.close();
-
-        if (wasCancelled) {
-          dismissLoading?.call(); // Hide if cancelled
-          try {
-            await dataSock.close();
-          } catch (_) {}
-          dataSock = null;
-          continue;
-        }
-
-        // Pause the Sender here until the Receiver fires the ACK!
-        debugPrint('[FILE-TX] Waiting for Receiver ACK...');
-        try {
-          await ackCompleter.future;
-          debugPrint('[FILE-TX] Received ACK!');
-        } catch (e) {
-          debugPrint('[FILE-TX] Failed to get ACK: $e');
-        }
-
-        _queue.completeItem(item.id);
-        debugPrint(
-          '[FILE-TX] Sent: ${item.fileName} (${sw.elapsedMilliseconds}ms)',
-        );
-
-        // Save to history
-        await _history.addRecord(
-          TransferRecord(
-            fileName: item.fileName,
-            fileSize: item.fileSize,
-            direction: 'sent',
-            deviceName: connectedDeviceName,
-            timestamp: DateTime.now(),
-            filePath: item.localFile?.path,
-          ),
-        );
-
-        // Hide loading and show completion
-        dismissLoading?.call();
-
-        if (isLastFile) {
-          _showCompletionPopup(
-            validItems.length > 1
-                ? '${validItems.length} files'
-                : item.fileName,
-            'sent',
-          );
-        }
-
-        await Future.delayed(Duration.zero);
-      } catch (e) {
-        debugPrint('[FILE-TX] Error sending ${item.fileName}: $e');
-        try {
-          _queue.failItem(item.id);
-        } catch (_) {}
-        try {
-          await dataSock?.close();
-        } catch (_) {}
-        dataSock = null; // Forces reconnect for the next file
-      }
+    } catch (e) {
+      debugPrint('[FILE-TX] Connection failed: $e');
+      return;
     }
 
-    try {
-      await dataSock?.close();
-    } catch (_) {}
-    debugPrint('[FILE-TX] All files sent, data socket closed');
-  }
+    for (final item in validItems) {
+      final file = item.localFile!;
+      final fileSize = await file.length();
 
-  // ─── Loading Popup ───
+      int bytesSent = (item.progress * fileSize).toInt();
+      _sessionStartBytes[item.id] = bytesSent;
+      final raf = await file.open(mode: FileMode.read);
+      if (bytesSent > 0) await raf.setPosition(bytesSent);
+      final sw = Stopwatch()..start();
 
-  VoidCallback? _showLoadingPopup(String message) {
-    final ctx = navigatorKey?.currentContext;
-    if (ctx == null) return null;
+      // Use parallel streams to send chunks
+      int streamIndex = 0;
+      while (bytesSent < fileSize) {
+        // ALWAYS fetch the latest status from the queue to avoid stale references
+        final latest = _queue.items.firstWhere((i) => i.id == item.id, orElse: () => item);
+        if (latest.isCancelled) break;
 
-    bool isShowing = true;
-    showDialog(
-      context: ctx,
-      barrierDismissible: false,
-      builder: (dialogCtx) => PopScope(
-        canPop: false,
-        child: AlertDialog(
-          backgroundColor: const Color(0xFF1E1E1E),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-          ),
-          content: Row(
-            children: [
-              const SizedBox(
-                width: 24,
-                height: 24,
-                child: CircularProgressIndicator(
-                  color: Colors.green,
-                  strokeWidth: 2,
-                ),
-              ),
-              const SizedBox(width: 20),
-              Expanded(
-                child: Text(
-                  message,
-                  style: const TextStyle(color: Colors.white, fontSize: 16),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    ).then((_) => isShowing = false);
+        // ─── PAUSE LOCK ───
+        while (latest.isPaused && !latest.isCancelled) {
+          await Future.delayed(const Duration(milliseconds: 500));
+          // Refresh status inside the loop
+          final inside = _queue.items.firstWhere((i) => i.id == item.id, orElse: () => item);
+          if (inside.isCancelled || !inside.isPaused) break;
+        }
+        if (latest.isCancelled) break;
 
-    // Returns a function that safely closes this specific dialog
-    return () {
-      if (isShowing && navigatorKey?.currentContext != null) {
-        Navigator.pop(navigatorKey!.currentContext!);
+        final currentOffset = bytesSent;
+        final currentSize = (bytesSent + chunkSize > fileSize)
+            ? fileSize - bytesSent
+            : chunkSize;
+        bytesSent += currentSize;
+
+        final chunk = await raf.read(currentSize);
+        final socket = sockets[streamIndex % sockets.length];
+        streamIndex++;
+
+        final header = jsonEncode({
+          'type': 'CHUNK',
+          'id': item.id,
+          'name': item.fileName,
+          'offset': currentOffset,
+          'size': currentSize,
+          'total': fileSize,
+        });
+
+        socket.write('$header\n');
+        socket.add(chunk);
+
+        // Flush logic restored for 6x6 stability
+        // Flush logic restored for 6x6 stability
+        if (streamIndex % parallelStreams == 0) {
+          final elapsed = sw.elapsedMilliseconds / 1000.0;
+          final progress = bytesSent / fileSize;
+          
+          // Speed: partial bytes sent / elapsed seconds
+          final speed = (elapsed > 0) ? (bytesSent - (_sessionStartBytes[item.id] ?? 0)) / elapsed : 0.0;
+          
+          _queue.updateProgress(item.id, progress, speed);
+          
+          await socket.flush();
+          await Future.delayed(Duration.zero);
+        }
       }
-    };
-  }
 
-  // ─── Completion Popup ───
+      // Signal file end on all sockets (broadcasting completion)
+      final endHeader = jsonEncode({'type': 'FILE_END', 'id': item.id});
+      for (final s in sockets) {
+        s.write('$endHeader\n');
+        await s.flush();
+      }
 
-  void _showCompletionPopup(String fileName, String direction) {
-    final ctx = navigatorKey?.currentContext;
-    if (ctx == null) return;
+      await raf.close();
+      _queue.completeItem(item.id);
 
-    final isSent = direction == 'sent';
-    final title = isSent ? 'File Sent ✓' : 'File Received ✓';
-    final subtitle = isSent
-        ? 'Sent to $connectedDeviceName'
-        : 'Received from $connectedDeviceName';
-
-    showDialog(
-      context: ctx,
-      barrierDismissible: true,
-      builder: (dialogCtx) => AlertDialog(
-        backgroundColor: const Color(0xFF1E1E1E),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: Row(
-          children: [
-            Icon(
-              isSent ? Icons.check_circle : Icons.download_done,
-              color: Colors.green,
-              size: 28,
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                title,
-                style: const TextStyle(color: Colors.green, fontSize: 18),
-              ),
-            ),
-          ],
+      await _history.addRecord(
+        TransferRecord(
+          fileName: item.fileName,
+          fileSize: fileSize,
+          direction: 'sent',
+          deviceName: connectedDeviceName,
+          timestamp: DateTime.now(),
         ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              fileName,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 15,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              subtitle,
-              style: const TextStyle(color: Colors.white54, fontSize: 13),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              Navigator.pop(dialogCtx);
-              // Navigate to history
-              Navigator.pushNamed(dialogCtx, '/history');
-            },
-            child: const Text(
-              'VIEW HISTORY',
-              style: TextStyle(color: Colors.white54),
-            ),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(dialogCtx),
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
-            child: const Text('OK', style: TextStyle(color: Colors.white)),
-          ),
-        ],
-      ),
-    );
-  }
+      );
+    }
 
-  // ─── Cleanup ───
+    for (final s in sockets) await s.close();
+  }
 
   void stopReceiver() {
     _receiving = false;
     _dataServer?.close();
     _dataServer = null;
-    debugPrint('[FILE-RX] Stopped.');
   }
 
   bool get isReceiving => _receiving;

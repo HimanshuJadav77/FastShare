@@ -41,7 +41,11 @@ class AppConnection extends ChangeNotifier {
       } else if (type == 'RESUME_TRANSFER') {
         try { _queue.resumeItem(json['id']); } catch (_) {}
       } else if (type == 'CANCEL_TRANSFER') {
-        try { _queue.cancelItem(json['id']); } catch (_) {}
+        try {
+          final itemName = _queue.items.firstWhere((i) => i.id == json['id']).fileName;
+          _queue.cancelItem(json['id']);
+          _showCancelledPopup(itemName);
+        } catch (_) {}
       }
     };
   }
@@ -54,6 +58,7 @@ class AppConnection extends ChangeNotifier {
   Timer? _heartbeatTimer;
   PendingConnectionRequest? _pendingRequest;
   StreamSubscription? _controlSocketSub;
+  int _heartbeatFailures = 0;
 
   // Global navigator key — set from main.dart
   static GlobalKey<NavigatorState>? navigatorKey;
@@ -131,7 +136,11 @@ class AppConnection extends ChangeNotifier {
           } else if (type == 'RESUME_TRANSFER') {
             try { _queue.resumeItem(json['id']); } catch (_) {}
           } else if (type == 'CANCEL_TRANSFER') {
-            try { _queue.cancelItem(json['id']); } catch (_) {}
+            try {
+              final itemName = _queue.items.firstWhere((i) => i.id == json['id']).fileName;
+              _queue.cancelItem(json['id']);
+              _showCancelledPopup(itemName);
+            } catch (_) {}
           }
         } catch (_) {}
       }
@@ -154,14 +163,39 @@ class AppConnection extends ChangeNotifier {
     }
   }
 
+  void _showCancelledPopup(String fileName) {
+    final ctx = navigatorKey?.currentContext;
+    if (ctx == null) return;
+
+    showDialog(
+      context: ctx,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Theme.of(ctx).scaffoldBackgroundColor,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Transfer Cancelled'),
+        content: Text('"$fileName" was cancelled by ${connectedDevice?.deviceName ?? "the other device"}.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _onRemoteDisconnect() {
     if (!isConnected && _state != ConnectionState.connecting) return;
+    
+    _heartbeatFailures = 0;
     
     final wasDevice = _connectedDevice?.deviceName ?? 'Unknown';
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
     _controlSocketSub?.cancel();
     _controlSocketSub = null;
+    
+    try { _controlSocket?.destroy(); } catch (_) {}
     _controlSocket = null;
     _connectedDevice = null;
     
@@ -411,42 +445,51 @@ class AppConnection extends ChangeNotifier {
 
   void _startHeartbeat(Socket socket) {
     _heartbeatTimer?.cancel();
-    _heartbeatTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+    _heartbeatFailures = 0;
+    _heartbeatTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       try {
         socket.write('${jsonEncode({'type': 'PING'})}\n');
+        _heartbeatFailures = 0; // Success
       } catch (e) {
-        debugPrint('[CONNECTION] Heartbeat failed: $e');
-        _onRemoteDisconnect();
+        _heartbeatFailures++;
+        debugPrint('[CONNECTION] Heartbeat failure ($_heartbeatFailures/5): $e');
+        if (_heartbeatFailures >= 5) {
+          _onRemoteDisconnect();
+        }
       }
     });
   }
 
   /// Explicitly disconnect — sends DISCONNECT message to remote peer first
   void disconnect() {
-    // Send DISCONNECT to the other side so they know
-    try {
-      _controlSocket?.write('${jsonEncode({'type': 'DISCONNECT'})}\n');
-    } catch (_) {}
+    if (!isConnected && _state != ConnectionState.connecting) return;
+    final wasDevice = _connectedDevice?.deviceName ?? 'Unknown';
+    debugPrint('[CONNECTION] Disconnecting manually from $wasDevice...');
+    
+    final socket = _controlSocket;
+    _controlSocket = null;
+    
+    if (socket != null) {
+      try {
+        socket.write('${jsonEncode({'type': 'DISCONNECT'})}\n');
+        socket.flush().then((_) {
+          socket.destroy();
+        }).catchError((_) {
+          socket.destroy();
+        });
+      } catch (_) {
+        socket.destroy();
+      }
+    }
 
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
     _controlSocketSub?.cancel();
     _controlSocketSub = null;
-
-    Future.delayed(const Duration(milliseconds: 100), () {
-      try { _controlSocket?.destroy(); } catch (_) {}
-      _controlSocket = null;
-    });
-
-    final wasConnected = _connectedDevice;
     _connectedDevice = null;
     
     fileTransfer.stopReceiver();
     _setState(ConnectionState.disconnected);
-
-    if (wasConnected != null) {
-      debugPrint('[CONNECTION] Disconnected from ${wasConnected.deviceName}');
-    }
   }
 
   void setTransferring() {

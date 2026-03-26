@@ -9,16 +9,15 @@ import 'package:wifi_ftp/ui/screens/transfer_dashboard.dart';
 import 'package:wifi_ftp/ui/screens/history_screen.dart';
 import 'package:wifi_ftp/ui/screens/settings_screen.dart';
 import 'package:wifi_ftp/ui/theme/app_theme.dart';
+import 'package:wifi_ftp/ui/theme/app_animations.dart';
 import 'package:wifi_ftp/core/providers/theme_provider.dart';
 
 final _navigatorKey = GlobalKey<NavigatorState>();
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  // Wire up global navigator key for dialogs/popups
   AppConnection.navigatorKey = _navigatorKey;
   FileTransferService.navigatorKey = _navigatorKey;
-  // Load transfer history
   TransferHistory().load();
   runApp(const ProviderScope(child: FastShareApp()));
 }
@@ -60,17 +59,7 @@ class FastShareApp extends ConsumerWidget {
             page = const HomeScreen();
         }
 
-        return PageRouteBuilder(
-          settings: settings,
-          pageBuilder: (context, animation, secondaryAnimation) => page,
-          transitionsBuilder: (context, animation, secondaryAnimation, child) {
-            return FadeTransition(
-              opacity: CurveTween(curve: Curves.easeOut).animate(animation),
-              child: child,
-            );
-          },
-          transitionDuration: const Duration(milliseconds: 300),
-        );
+        return AppAnimations.createRoute(page);
       },
     );
   }

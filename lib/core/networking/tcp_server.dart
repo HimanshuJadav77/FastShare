@@ -50,70 +50,53 @@ class TcpServer {
             // Try to parse as text control message
             rawBuffer.addAll(data);
 
-            // Check if we can decode as UTF-8 text
+            // New Robust Logic: Only clear buffer for what we actually parsed
             try {
-              final text = utf8.decode(rawBuffer);
-
-              while (text.contains('\n')) {
-                final decoded = utf8.decode(rawBuffer);
-                final nlIndex = decoded.indexOf('\n');
-                final line = decoded.substring(0, nlIndex).trim();
-                final remaining = decoded.substring(nlIndex + 1);
-                rawBuffer.clear();
-                rawBuffer.addAll(utf8.encode(remaining));
-
-                if (line.isEmpty) continue;
-
-                try {
-                  final json = jsonDecode(line) as Map<String, dynamic>;
-                  debugPrint('[TCP-SERVER] Message: ${json['type']}');
-
-                  if (json['type'] == 'HELLO_PC') {
-                    debugPrint('[TCP-SERVER] Received HELLO_PC');
-                    // DO NOT auto-send OK — let AppConnection decide (accept/reject dialog)
-                    final peerName = json['device_name'] as String? ?? 'Unknown';
-                    final peerId = json['device_id'] as String? ?? '';
-                    try {
-                      onPeerConnected?.call(
-                        client.remoteAddress.address,
-                        client.remotePort,
-                        peerName,
-                        peerId,
-                        client,
-                      );
-                    } catch (e) {
-                      debugPrint('[TCP-SERVER] onPeerConnected error: $e');
+              final String decoded = utf8.decode(rawBuffer, allowMalformed: true);
+              if (decoded.contains('\n')) {
+                final lines = decoded.split('\n');
+                // The last element is either empty or a partial line
+                final String partialLine = lines.last;
+                
+                for (int i = 0; i < lines.length - 1; i++) {
+                  final line = lines[i].trim();
+                  if (line.isEmpty) continue;
+                  
+                  try {
+                    final json = jsonDecode(line) as Map<String, dynamic>;
+                    debugPrint('[TCP-SERVER] Signal: ${json['type']}');
+                    
+                    if (json['type'] == 'HELLO_PC') {
+                      onPeerConnected?.call(client.remoteAddress.address, client.remotePort, json['device_name'] ?? 'Unknown', json['device_id'] ?? '', client);
+                    } else if (json['type'] == 'PING') {
+                      _safeWrite(client, '${jsonEncode({'type': 'PONG'})}\n');
+                    } else if (json['type'] == 'DISCONNECT') {
+                      onPeerDisconnected?.call(client);
+                    } else if (json['type'] == 'CANCEL_TRANSFER' || json['type'] == 'PAUSE_TRANSFER' || json['type'] == 'RESUME_TRANSFER') {
+                      onControlMessage?.call(json);
+                    } else if (json['type'] == 'DATA_INIT') {
+                      isDataSocket = true;
+                      _dataSockets.add(client);
+                      // Hand over the REMAINING buffer to binary mode if any
+                      rawBuffer.clear();
+                      if (partialLine.isNotEmpty) {
+                        _handleBinaryData(Uint8List.fromList(utf8.encode(partialLine)), client);
+                      }
+                      return; // Exit loop, promoted to binary
                     }
-                  } else if (json['type'] == 'PING') {
-                    _safeWrite(client, '${jsonEncode({'type': 'PONG'})}\n');
-                  } else if (json['type'] == 'DISCONNECT') {
-                    debugPrint('[TCP-SERVER] Peer sent DISCONNECT');
-                    onPeerDisconnected?.call(client);
-                  } else if (json['type'] == 'CANCEL_TRANSFER' || 
-                             json['type'] == 'PAUSE_TRANSFER' || 
-                             json['type'] == 'RESUME_TRANSFER') {
-                    onControlMessage?.call(json);
-                  } else if (json['type'] == 'DATA_INIT') {
-                    debugPrint('[TCP-SERVER] Data socket initialized - switching to binary mode');
-                    isDataSocket = true;
-                    _dataSockets.add(client);
-                    rawBuffer.clear();
+                    
+                    if (!_messageController.isClosed) _messageController.add(json);
+                  } catch (e) {
+                    debugPrint('[TCP-SERVER] JSON Error: $e');
                   }
-
-                  if (!_messageController.isClosed) {
-                    _messageController.add(json);
-                  }
-                } catch (e) {
-                  debugPrint('[TCP-SERVER] JSON parse error: $e');
                 }
-                break; // Process one message at a time
+                
+                // Keep only the partial line in the buffer
+                rawBuffer.clear();
+                rawBuffer.addAll(utf8.encode(partialLine));
               }
-            } catch (_) {
-              // If we can't decode as UTF-8, it's binary data on a misidentified socket
-              isDataSocket = true;
-              _dataSockets.add(client);
-              rawBuffer.clear();
-              _handleBinaryData(data, client);
+            } catch (e) {
+              debugPrint('[TCP-SERVER] Decode Error (ignoring malformed): $e');
             }
           },
           onDone: () {
@@ -152,12 +135,14 @@ class TcpServer {
     }
   }
 
-  void stop() {
-    for (var c in _clients) {
-      try { c.close(); } catch (_) {}
+  void stop({bool forceCloseClients = false}) {
+    if (forceCloseClients) {
+      for (var c in _clients) {
+        try { c.close(); } catch (_) {}
+      }
+      _clients.clear();
+      _dataSockets.clear();
     }
-    _clients.clear();
-    _dataSockets.clear();
     _serverSocket?.close();
     _serverSocket = null;
     debugPrint('[TCP-SERVER] Stopped.');

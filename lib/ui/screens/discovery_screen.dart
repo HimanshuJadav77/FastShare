@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:device_info_plus/device_info_plus.dart';
@@ -6,9 +7,8 @@ import 'package:uuid/uuid.dart';
 import 'package:wifi_ftp/core/data/models/device_model.dart';
 import 'package:wifi_ftp/core/networking/app_connection.dart' as app;
 import 'package:wifi_ftp/core/providers.dart';
-import 'package:wifi_ftp/ui/widgets/app_app_bar.dart';
-import 'package:wifi_ftp/ui/widgets/app_card.dart';
 import 'package:wifi_ftp/ui/theme/app_theme.dart';
+import 'package:wifi_ftp/ui/theme/app_animations.dart';
 
 class DiscoveryScreen extends ConsumerStatefulWidget {
   const DiscoveryScreen({super.key});
@@ -25,22 +25,12 @@ class _DiscoveryScreenState extends ConsumerState<DiscoveryScreen> {
   void initState() {
     super.initState();
     _connection = ref.read(appConnectionProvider);
-
-    // Warm up history loading
     ref.read(transferHistoryProvider).load();
 
-    // If already connected, go straight to dashboard
-    if (_connection.isConnected) {
-      _navigatedAway = true;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) Navigator.pushReplacementNamed(context, '/dashboard');
-      });
-      return;
-    }
+    // Don't disconnect here - if connected, DiscoveryScreen will show connecting/connected states
+    // but typically HomeScreen redirects to /dashboard if connected.
 
-    // Listen for state changes (e.g. OTHER device connected to us via TCP)
     _connection.addListener(_onConnectionStateChanged);
-
     _startDiscovery();
   }
 
@@ -48,25 +38,33 @@ class _DiscoveryScreenState extends ConsumerState<DiscoveryScreen> {
     if (_navigatedAway) return;
     if (_connection.isConnected && mounted) {
       _navigatedAway = true;
-      debugPrint('[UI] Other device connected to us — navigating to dashboard');
+      // 1. Save last connected device info
+      final device = _connection.connectedDevice;
+      if (device != null) {
+        ref.read(settingsProvider.notifier).setLastDevice(device.deviceName, device.deviceType);
+      }
       Navigator.pushReplacementNamed(context, '/dashboard');
     }
   }
 
   Future<void> _startDiscovery() async {
-    if (_connection.state == app.ConnectionState.discovering) return;
-
     String deviceName = ref.read(settingsProvider).deviceName;
     String deviceType = 'unknown';
+
+    // Only fallback to system name if the user hasn't set one AND settings name is the default
     try {
       if (Platform.isAndroid) {
-        final info = await DeviceInfoPlugin().androidInfo;
-        deviceName = '${info.brand} ${info.model}';
         deviceType = 'android';
+        if (deviceName.isEmpty || deviceName == 'android-device') {
+          final info = await DeviceInfoPlugin().androidInfo;
+          deviceName = '${info.brand} ${info.model}';
+        }
       } else if (Platform.isWindows) {
-        final info = await DeviceInfoPlugin().windowsInfo;
-        deviceName = info.computerName;
         deviceType = 'windows';
+        if (deviceName.isEmpty || deviceName == 'windows-pc') {
+          final info = await DeviceInfoPlugin().windowsInfo;
+          deviceName = info.computerName;
+        }
       }
     } catch (_) {}
 
@@ -83,14 +81,15 @@ class _DiscoveryScreenState extends ConsumerState<DiscoveryScreen> {
 
   Future<void> _connectToDevice(DeviceModel device) async {
     final success = await _connection.connectToDevice(device);
-    if (_navigatedAway) return;
-    if (!mounted) return;
+    if (!mounted || _navigatedAway) return;
     if (success) {
       _navigatedAway = true;
+      // 2. Save last connected device info
+      ref.read(settingsProvider.notifier).setLastDevice(device.deviceName, device.deviceType);
       Navigator.pushReplacementNamed(context, '/dashboard');
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Connection failed. Try again.')),
+        SnackBar(content: const Text('Connection failed'), behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
       );
       _startDiscovery();
     }
@@ -99,8 +98,7 @@ class _DiscoveryScreenState extends ConsumerState<DiscoveryScreen> {
   @override
   void dispose() {
     _connection.removeListener(_onConnectionStateChanged);
-    // Don't stop discovery in dispose — let it run if not connected
-    // The connection singleton manages its own lifecycle
+    _connection.stopDiscovery();
     super.dispose();
   }
 
@@ -108,96 +106,149 @@ class _DiscoveryScreenState extends ConsumerState<DiscoveryScreen> {
   Widget build(BuildContext context) {
     ref.watch(appConnectionProvider);
     final ext = context.appColors;
+    final topPadding = MediaQuery.paddingOf(context).top;
 
     return Scaffold(
       extendBodyBehindAppBar: true,
-      appBar: AppAppBar(
-        title: 'NEARBY DEVICES',
-        actions: [
-          if (_connection.state == app.ConnectionState.discovering)
-            const Padding(
-              padding: EdgeInsets.only(right: 16),
-              child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)),
-            ),
-        ],
-      ),
-      body: SafeArea(
-        child: StreamBuilder<List<DeviceModel>>(
-          stream: _connection.orchestrator.discoveredDevices,
-          initialData: const [],
-          builder: (context, snapshot) {
-            final devices = snapshot.data ?? [];
+      body: Stack(
+        children: [
+          // ─── Main Content ───
+          Positioned.fill(
+            child: StreamBuilder<List<DeviceModel>>(
+              stream: _connection.orchestrator.discoveredDevices,
+              initialData: const [],
+              builder: (context, snapshot) {
+                final devices = snapshot.data ?? [];
 
-            if (_connection.state == app.ConnectionState.connecting) {
-              return Center(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    CircularProgressIndicator(color: ext.warning),
-                    const SizedBox(height: 24),
-                    Text('Connecting...', style: TextStyle(color: ext.warning, fontSize: 18, fontWeight: FontWeight.w600)),
-                  ],
-                ),
-              );
-            }
+                if (_connection.state == app.ConnectionState.connecting) {
+                  return _buildConnectingState(ext);
+                }
 
-            if (devices.isEmpty) {
-              return Center(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    const Icon(Icons.radar, size: 64, color: Colors.grey),
-                    const SizedBox(height: 24),
-                    Text('Searching for nearby devices...', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600)),
-                    const SizedBox(height: 8),
-                    Text('Ensure both devices are on the same Wi-Fi', style: TextStyle(color: ext.textMuted, fontSize: 13)),
-                  ],
-                ),
-              );
-            }
+                if (devices.isEmpty) {
+                  return _buildEmptyState(context, ext);
+                }
 
-            return ListView.separated(
-              padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 16),
-              itemCount: devices.length,
-              separatorBuilder: (_, __) => const SizedBox(height: 12),
-              itemBuilder: (context, index) {
-                final device = devices[index];
-                return AppCard(
-                  padding: const EdgeInsets.all(12),
-                  onTap: () => _connectToDevice(device),
-                  child: Row(
-                    children: [
-                      Container(
-                        width: 48,
-                        height: 48,
-                        decoration: BoxDecoration(
-                          color: Theme.of(context).primaryColor.withValues(alpha: 0.1),
-                          shape: BoxShape.circle,
-                        ),
-                        child: Icon(
-                          device.deviceType == 'windows' ? Icons.computer : Icons.phone_android,
-                          color: Theme.of(context).primaryColor,
-                        ),
-                      ),
-                      const SizedBox(width: 16),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(device.deviceName, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-                            const SizedBox(height: 2),
-                            Text(device.deviceType.toUpperCase(), style: TextStyle(color: ext.textMuted, fontSize: 12)),
-                          ],
-                        ),
-                      ),
-                      Icon(Icons.chevron_right, color: ext.textMuted),
-                    ],
-                  ),
+                return ListView.separated(
+                  padding: EdgeInsets.fromLTRB(20, topPadding + 100, 20, 40),
+                  itemCount: devices.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 16),
+                  itemBuilder: (context, index) {
+                    final device = devices[index];
+                    return _buildDeviceCard(context, device, ext, index);
+                  },
                 );
               },
-            );
-          },
+            ),
+          ),
+
+          // ─── Frosty Glass Header ───
+          Positioned(
+            top: 0, left: 0, right: 0,
+            child: ClipRRect(
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+                child: Container(
+                  height: topPadding + 80,
+                  padding: EdgeInsets.only(top: topPadding, left: 20, right: 20),
+                  decoration: BoxDecoration(
+                    color: ext.glassBackground,
+                    border: Border(bottom: BorderSide(color: Colors.white.withValues(alpha: 0.05), width: 0.5)),
+                  ),
+                  child: Row(
+                    children: [
+                      AppAnimations.scaleOnTap(
+                        onTap: () => Navigator.pop(context),
+                        child: const Icon(Icons.arrow_back_ios_new_rounded, size: 20),
+                      ),
+                      const SizedBox(width: 20),
+                      Text(
+                        'Nearby Devices',
+                        style: context.text.titleLarge?.copyWith(
+                          fontWeight: FontWeight.w900,
+                          color: Theme.of(context).colorScheme.onSurface,
+                          letterSpacing: -0.5,
+                        ),
+                      ),
+                      const Spacer(),
+                      if (_connection.state == app.ConnectionState.discovering)
+                        const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2.5)),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDeviceCard(BuildContext context, DeviceModel device, AppThemeExtension ext, int index) {
+    final isWindows = device.deviceType == 'windows';
+    return TweenAnimationBuilder<double>(
+      tween: Tween(begin: 0.0, end: 1.0),
+      duration: Duration(milliseconds: 400 + (index * 100)),
+      builder: (context, value, child) => Transform.translate(offset: Offset(0, 20 * (1 - value)), child: Opacity(opacity: value, child: child)),
+      child: AppAnimations.scaleOnTap(
+        onTap: () => _connectToDevice(device),
+        child: Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(color: Theme.of(context).cardColor, borderRadius: BorderRadius.circular(24), boxShadow: ext.antiGravityShadow),
+          child: Row(
+            children: [
+              Container(
+                width: 56, height: 56,
+                decoration: BoxDecoration(gradient: LinearGradient(colors: [Theme.of(context).primaryColor.withValues(alpha: 0.1), Theme.of(context).primaryColor.withValues(alpha: 0.05)]), shape: BoxShape.circle),
+                child: Icon(isWindows ? Icons.desktop_windows_rounded : Icons.phone_android_rounded, color: Theme.of(context).primaryColor, size: 28),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(device.deviceName, style: TextStyle(fontSize: 17, fontWeight: FontWeight.w900, color: Theme.of(context).colorScheme.onSurface)),
+                    const SizedBox(height: 4),
+                    Text(isWindows ? 'Windows Desktop' : 'Android Mobile', style: TextStyle(color: ext.textMuted, fontSize: 13, fontWeight: FontWeight.w500)),
+                  ],
+                ),
+              ),
+              Icon(Icons.chevron_right_rounded, color: ext.textMuted.withValues(alpha: 0.3)),
+            ],
+          ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildConnectingState(AppThemeExtension ext) {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const SizedBox(width: 48, height: 48, child: CircularProgressIndicator(strokeWidth: 5, strokeCap: StrokeCap.round)),
+          const SizedBox(height: 32),
+          Text('Securing Connection...', style: context.text.titleMedium?.copyWith(fontWeight: FontWeight.w900, color: Theme.of(context).colorScheme.onSurface)),
+          const SizedBox(height: 8),
+          Text('Keep both devices close', style: TextStyle(color: ext.textMuted)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildEmptyState(BuildContext context, AppThemeExtension ext) {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.radar_rounded, size: 80, color: Theme.of(context).primaryColor.withValues(alpha: 0.2)),
+          const SizedBox(height: 32),
+          Text('Scanning for Devices', style: context.text.titleMedium?.copyWith(fontWeight: FontWeight.w900, color: Theme.of(context).colorScheme.onSurface)),
+          const SizedBox(height: 12),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 40),
+            child: Text('Make sure both devices have Bluetooth and Wi-Fi enabled.', textAlign: TextAlign.center, style: TextStyle(color: ext.textMuted, fontSize: 14, height: 1.5)),
+          ),
+        ],
       ),
     );
   }

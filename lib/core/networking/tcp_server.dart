@@ -34,6 +34,7 @@ class TcpServer {
       _serverSocket!.listen((Socket client) {
         debugPrint('[TCP-SERVER] New connection from ${client.remoteAddress.address}:${client.remotePort}');
         _clients.add(client);
+        client.done.catchError((_) {});
 
         // Buffer for text-based control messages
         final List<int> rawBuffer = [];

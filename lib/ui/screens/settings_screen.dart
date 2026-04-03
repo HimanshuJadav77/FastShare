@@ -1,4 +1,3 @@
-import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:file_picker/file_picker.dart';
@@ -6,6 +5,7 @@ import 'package:wifi_ftp/core/providers.dart';
 import 'package:wifi_ftp/ui/theme/app_theme.dart';
 import 'package:wifi_ftp/ui/theme/app_animations.dart';
 import 'package:wifi_ftp/core/transfer/file_transfer_service.dart';
+import 'package:wifi_ftp/ui/widgets/fs_app_bar.dart';
 
 class SettingsScreen extends ConsumerWidget {
   const SettingsScreen({super.key});
@@ -14,7 +14,6 @@ class SettingsScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final settings = ref.watch(settingsProvider);
     final ext = context.appColors;
-    final topPadding = MediaQuery.paddingOf(context).top;
 
     // Sync settings to service singleton
     final service = FileTransferService();
@@ -25,107 +24,31 @@ class SettingsScreen extends ConsumerWidget {
       extendBodyBehindAppBar: true,
       body: Stack(
         children: [
-          // ─── Main Content ───
           Positioned.fill(
             child: ListView(
-              padding: EdgeInsets.fromLTRB(20, topPadding + 100, 20, 40),
+              padding: EdgeInsets.fromLTRB(20, FsAppBar.bodyTopPadding(context), 20, 40),
               children: [
                 _buildSectionHeader('DEVICE IDENTITY'),
-                _buildSettingItem(
-                  context,
-                  'Display Name',
-                  settings.deviceName,
-                  Icons.edit_rounded,
-                  () => _showNameDialog(context, ref, settings.deviceName),
-                  ext,
-                ),
+                _buildSettingItem(context, 'Display Name', settings.deviceName, Icons.edit_rounded, () => _showNameDialog(context, ref, settings.deviceName), ext),
                 const SizedBox(height: 24),
                 _buildSectionHeader('APPEARANCE'),
                 _buildThemeSelector(context, ref, ext),
                 const SizedBox(height: 24),
                 _buildSectionHeader('TRANSFERS'),
-                _buildSettingItem(
-                  context,
-                  'Default Path',
-                  _truncatePath(settings.downloadPath),
-                  Icons.folder_open_rounded,
-                  () async {
-                    String? result = await FilePicker.platform.getDirectoryPath();
-                    if (result != null) {
-                      ref.read(settingsProvider.notifier).setDownloadPath(result);
-                    }
-                  },
-                  ext,
-                ),
-                _buildSettingItem(
-                  context,
-                  'Auto-Resume',
-                  settings.autoResumeEnabled ? 'Enabled' : 'Disabled',
-                  Icons.refresh_rounded,
-                  () => ref.read(settingsProvider.notifier).toggleAutoResume(!settings.autoResumeEnabled),
-                  ext,
-                  trailing: Switch.adaptive(
-                    value: settings.autoResumeEnabled,
-                    activeColor: Theme.of(context).primaryColor,
-                    onChanged: (v) => ref.read(settingsProvider.notifier).toggleAutoResume(v),
-                  ),
-                ),
+                _buildSettingItem(context, 'Default Path', _truncatePath(settings.downloadPath), Icons.folder_open_rounded, () async {
+                  final result = await FilePicker.platform.getDirectoryPath();
+                  if (result != null) ref.read(settingsProvider.notifier).setDownloadPath(result);
+                }, ext),
+                _buildSettingItem(context, 'Auto-Resume', settings.autoResumeEnabled ? 'Enabled' : 'Disabled', Icons.refresh_rounded, () => ref.read(settingsProvider.notifier).toggleAutoResume(!settings.autoResumeEnabled), ext,
+                  trailing: Switch.adaptive(value: settings.autoResumeEnabled, activeColor: Theme.of(context).primaryColor, onChanged: (v) => ref.read(settingsProvider.notifier).toggleAutoResume(v))),
                 const SizedBox(height: 24),
                 _buildSectionHeader('ABOUT'),
-                _buildSettingItem(
-                  context,
-                  'Version',
-                  '1.0.4',
-                  Icons.info_outline_rounded,
-                  null,
-                  ext,
-                ),
-                _buildSettingItem(
-                  context,
-                  'Developer',
-                  'FastShare Team',
-                  Icons.code_rounded,
-                  null,
-                  ext,
-                ),
+                _buildSettingItem(context, 'Version', '1.0.4', Icons.info_outline_rounded, null, ext),
+                _buildSettingItem(context, 'Developer', 'FastShare Team', Icons.code_rounded, null, ext),
               ],
             ),
           ),
-
-          // ─── Frosty Glass Header ───
-          Positioned(
-            top: 0, left: 0, right: 0,
-            child: ClipRRect(
-              child: BackdropFilter(
-                filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
-                child: Container(
-                  height: topPadding + 80,
-                  padding: EdgeInsets.only(top: topPadding, left: 24, right: 24),
-                  decoration: BoxDecoration(
-                    color: ext.glassBackground,
-                    border: Border(bottom: BorderSide(color: Colors.white.withValues(alpha: 0.05), width: 0.5)),
-                  ),
-                  child: Row(
-                    children: [
-                      AppAnimations.scaleOnTap(
-                        onTap: () => Navigator.pop(context),
-                        child: const Icon(Icons.arrow_back_ios_new_rounded, size: 20),
-                      ),
-                      const SizedBox(width: 20),
-                      Text(
-                        'Settings',
-                        style: context.text.titleLarge?.copyWith(
-                          fontWeight: FontWeight.w900,
-                          color: Theme.of(context).brightness == Brightness.dark ? Colors.white : Colors.black,
-                          letterSpacing: -0.5,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
+          FsAppBar(title: 'Settings', onBack: () => Navigator.pop(context)),
         ],
       ),
     );

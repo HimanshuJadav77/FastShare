@@ -1,9 +1,9 @@
-import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:wifi_ftp/core/providers.dart';
 import 'package:wifi_ftp/ui/theme/app_theme.dart';
 import 'package:wifi_ftp/ui/theme/app_animations.dart';
+import 'package:wifi_ftp/ui/widgets/fs_app_bar.dart';
 
 class HistoryScreen extends ConsumerWidget {
   const HistoryScreen({super.key});
@@ -12,66 +12,31 @@ class HistoryScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final history = ref.watch(transferHistoryProvider);
     final ext = context.appColors;
-    final topPadding = MediaQuery.paddingOf(context).top;
+    final topOffset = FsAppBar.bodyTopPadding(context);
 
     return Scaffold(
       extendBodyBehindAppBar: true,
       body: Stack(
         children: [
-          // ─── Main Content ───
           Positioned.fill(
             child: history.records.isEmpty
                 ? _buildEmptyState(context, ext)
                 : ListView.separated(
-                    padding: EdgeInsets.fromLTRB(20, topPadding + 100, 20, 40),
+                    padding: EdgeInsets.fromLTRB(20, topOffset, 20, 40),
                     itemCount: history.records.length,
                     separatorBuilder: (_, __) => const SizedBox(height: 12),
-                    itemBuilder: (context, index) {
-                      final record = history.records[index];
-                      return _buildHistoryCard(context, record, ext, index);
-                    },
+                    itemBuilder: (context, index) =>
+                        _buildHistoryCard(context, history.records[index], ext, index),
                   ),
           ),
-
-          // ─── Frosty Glass Header ───
-          Positioned(
-            top: 0, left: 0, right: 0,
-            child: ClipRRect(
-              child: BackdropFilter(
-                filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
-                child: Container(
-                  height: topPadding + 80,
-                  padding: EdgeInsets.only(top: topPadding, left: 24, right: 24),
-                  decoration: BoxDecoration(
-                    color: ext.glassBackground,
-                    border: Border(bottom: BorderSide(color: Colors.white.withValues(alpha: 0.05), width: 0.5)),
-                  ),
-                  child: Row(
-                    children: [
-                      AppAnimations.scaleOnTap(
-                        onTap: () => Navigator.pop(context),
-                        child: const Icon(Icons.arrow_back_ios_new_rounded, size: 20),
-                      ),
-                      const SizedBox(width: 20),
-                      Text(
-                        'Transfer History',
-                        style: context.text.titleLarge?.copyWith(
-                          fontWeight: FontWeight.w900,
-                          color: Theme.of(context).colorScheme.onSurface,
-                          letterSpacing: -0.5,
-                        ),
-                      ),
-                      const Spacer(),
-                      AppAnimations.scaleOnTap(
-                        onTap: () => _confirmClear(context, ref),
-                        child: Text(
-                          'Clear',
-                          style: TextStyle(color: ext.danger, fontWeight: FontWeight.bold, fontSize: 13),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+          FsAppBar(
+            title: 'History',
+            onBack: () => Navigator.pop(context),
+            trailing: Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: AppAnimations.scaleOnTap(
+                onTap: () => _confirmClear(context, ref),
+                child: Text('Clear', style: TextStyle(color: ext.danger, fontWeight: FontWeight.bold, fontSize: 13)),
               ),
             ),
           ),
@@ -81,7 +46,7 @@ class HistoryScreen extends ConsumerWidget {
   }
 
   Widget _buildHistoryCard(BuildContext context, dynamic record, AppThemeExtension ext, int index) {
-    final isSending = record.direction == 'sending';
+    final isSending = record.direction == 'sent';
     return TweenAnimationBuilder<double>(
       tween: Tween(begin: 0.0, end: 1.0),
       duration: Duration(milliseconds: 300 + (index * 50)),
@@ -103,14 +68,14 @@ class HistoryScreen extends ConsumerWidget {
                 children: [
                   Text(record.fileName, style: TextStyle(fontWeight: FontWeight.w900, fontSize: 14, color: Theme.of(context).colorScheme.onSurface)),
                   const SizedBox(height: 2),
-                  Text(record.peerName, style: TextStyle(color: ext.textMuted, fontSize: 12, fontWeight: FontWeight.w500)),
+                  Text(record.deviceName, style: TextStyle(color: ext.textMuted, fontSize: 12, fontWeight: FontWeight.w500)),
                 ],
               ),
             ),
             Column(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                Text(record.formattedSize, style: TextStyle(fontWeight: FontWeight.w900, fontSize: 13, color: Theme.of(context).colorScheme.onSurface)),
+                Text(record.fileSizeFormatted, style: TextStyle(fontWeight: FontWeight.w900, fontSize: 13, color: Theme.of(context).colorScheme.onSurface)),
                 Text(_formatDate(record.timestamp), style: TextStyle(color: ext.textMuted, fontSize: 10, fontWeight: FontWeight.bold)),
               ],
             ),

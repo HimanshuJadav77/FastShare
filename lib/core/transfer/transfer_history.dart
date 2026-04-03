@@ -31,11 +31,13 @@ class TransferRecord {
   };
 
   factory TransferRecord.fromJson(Map<String, dynamic> json) => TransferRecord(
-    fileName: json['fileName'] as String,
-    fileSize: json['fileSize'] as int,
-    direction: json['direction'] as String,
-    deviceName: json['deviceName'] as String,
-    timestamp: DateTime.parse(json['timestamp'] as String),
+    fileName: json['fileName'] as String? ?? 'Unknown File',
+    fileSize: json['fileSize'] as int? ?? 0,
+    direction: json['direction'] as String? ?? 'unknown',
+    deviceName: json['deviceName'] as String? ?? 'Unknown Device',
+    timestamp: json['timestamp'] != null 
+        ? DateTime.tryParse(json['timestamp'].toString()) ?? DateTime.now()
+        : DateTime.now(),
     filePath: json['filePath'] as String?,
   );
 
@@ -84,9 +86,15 @@ class TransferHistory extends ChangeNotifier {
         final content = await file.readAsString();
         final list = jsonDecode(content) as List;
         _records.clear();
-        _records.addAll(
-          list.map((e) => TransferRecord.fromJson(e as Map<String, dynamic>)),
-        );
+        for (final e in list) {
+          if (e is Map<String, dynamic>) {
+            try {
+              _records.add(TransferRecord.fromJson(e));
+            } catch (err) {
+              debugPrint('[HISTORY] Skip invalid record: $err');
+            }
+          }
+        }
         _records.sort((a, b) => b.timestamp.compareTo(a.timestamp));
       }
       _loaded = true;

@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:device_info_plus/device_info_plus.dart';
@@ -9,6 +8,7 @@ import 'package:wifi_ftp/core/networking/app_connection.dart' as app;
 import 'package:wifi_ftp/core/providers.dart';
 import 'package:wifi_ftp/ui/theme/app_theme.dart';
 import 'package:wifi_ftp/ui/theme/app_animations.dart';
+import 'package:wifi_ftp/ui/widgets/fs_app_bar.dart';
 
 class DiscoveryScreen extends ConsumerStatefulWidget {
   const DiscoveryScreen({super.key});
@@ -106,77 +106,44 @@ class _DiscoveryScreenState extends ConsumerState<DiscoveryScreen> {
   Widget build(BuildContext context) {
     ref.watch(appConnectionProvider);
     final ext = context.appColors;
-    final topPadding = MediaQuery.paddingOf(context).top;
+    final topOffset = FsAppBar.bodyTopPadding(context);
 
     return Scaffold(
       extendBodyBehindAppBar: true,
       body: Stack(
         children: [
-          // ─── Main Content ───
           Positioned.fill(
             child: StreamBuilder<List<DeviceModel>>(
               stream: _connection.orchestrator.discoveredDevices,
               initialData: const [],
               builder: (context, snapshot) {
                 final devices = snapshot.data ?? [];
-
                 if (_connection.state == app.ConnectionState.connecting) {
                   return _buildConnectingState(ext);
                 }
-
                 if (devices.isEmpty) {
                   return _buildEmptyState(context, ext);
                 }
-
                 return ListView.separated(
-                  padding: EdgeInsets.fromLTRB(20, topPadding + 100, 20, 40),
+                  padding: EdgeInsets.fromLTRB(20, topOffset, 20, 40),
                   itemCount: devices.length,
                   separatorBuilder: (_, __) => const SizedBox(height: 16),
-                  itemBuilder: (context, index) {
-                    final device = devices[index];
-                    return _buildDeviceCard(context, device, ext, index);
-                  },
+                  itemBuilder: (context, index) =>
+                      _buildDeviceCard(context, devices[index], ext, index),
                 );
               },
             ),
           ),
-
-          // ─── Frosty Glass Header ───
-          Positioned(
-            top: 0, left: 0, right: 0,
-            child: ClipRRect(
-              child: BackdropFilter(
-                filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
-                child: Container(
-                  height: topPadding + 80,
-                  padding: EdgeInsets.only(top: topPadding, left: 20, right: 20),
-                  decoration: BoxDecoration(
-                    color: ext.glassBackground,
-                    border: Border(bottom: BorderSide(color: Colors.white.withValues(alpha: 0.05), width: 0.5)),
-                  ),
-                  child: Row(
-                    children: [
-                      AppAnimations.scaleOnTap(
-                        onTap: () => Navigator.pop(context),
-                        child: const Icon(Icons.arrow_back_ios_new_rounded, size: 20),
-                      ),
-                      const SizedBox(width: 20),
-                      Text(
-                        'Nearby Devices',
-                        style: context.text.titleLarge?.copyWith(
-                          fontWeight: FontWeight.w900,
-                          color: Theme.of(context).colorScheme.onSurface,
-                          letterSpacing: -0.5,
-                        ),
-                      ),
-                      const Spacer(),
-                      if (_connection.state == app.ConnectionState.discovering)
-                        const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2.5)),
-                    ],
-                  ),
-                ),
-              ),
-            ),
+          FsAppBar(
+            title: 'Nearby Devices',
+            onBack: () => Navigator.pop(context),
+            trailing: _connection.state == app.ConnectionState.discovering
+                ? const Padding(
+                    padding: EdgeInsets.only(right: 12),
+                    child: SizedBox(width: 18, height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2.5, strokeCap: StrokeCap.round)),
+                  )
+                : null,
           ),
         ],
       ),

@@ -199,6 +199,9 @@ class AppConnection extends ChangeNotifier {
     _controlSocket = null;
     _connectedDevice = null;
     
+    // Pause all active sender isolates gracefully so transfers can resume later
+    try { fileTransfer.pauseAllSenders(); } catch (_) {}
+
     fileTransfer.stopReceiver();
     _setState(ConnectionState.disconnected);
     debugPrint('[CONNECTION] Remote disconnected: $wasDevice');
@@ -383,6 +386,7 @@ class AppConnection extends ChangeNotifier {
         device.port,
         timeout: const Duration(seconds: 5),
       );
+      socket.done.catchError((_) {});
       _controlSocket = socket;
 
       final handshake = jsonEncode({
@@ -452,8 +456,8 @@ class AppConnection extends ChangeNotifier {
         _heartbeatFailures = 0; // Success
       } catch (e) {
         _heartbeatFailures++;
-        debugPrint('[CONNECTION] Heartbeat failure ($_heartbeatFailures/5): $e');
-        if (_heartbeatFailures >= 5) {
+        debugPrint('[CONNECTION] Heartbeat failure ($_heartbeatFailures/3): $e');
+        if (_heartbeatFailures >= 3) {
           _onRemoteDisconnect();
         }
       }

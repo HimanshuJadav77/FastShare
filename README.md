@@ -1,64 +1,57 @@
-# Wi-Fi FTP Server
+# FastShare 🚀
 
-A high-performance, monochrome-themed Flutter application that turns your Android device into a Wi-Fi FTP server.
+**FastShare** is a high-performance, local-first file transfer application for Android. Designed to eliminate the friction of cloud-based sharing, it leverages a custom peer-to-peer protocol to achieve blazing-fast speeds over Wi-Fi.
 
-## Features
-- **Wi-Fi FTP Server**: Access device files from any FTP client (FileZilla, Windows Explorer).
-- **Speed Optimized**: Designed for LAN performance.
-- **Secure**: Randomly generated credentials, LAN-only access.
-- **Theme**: Strict Monochrome (Black & White).
-- **Permissions**: Handles Android 8-10 and Android 11+ storage permissions.
-- **QR Connect**: Scan to connect instantly.
+![FastShare UI](https://via.placeholder.com/800x450?text=FastShare+Modern+Minimal+UI)
 
-## Setup & Permissions
-### Android 10
-- Based on `requestLegacyExternalStorage`, just grant "Storage" permission.
+## ✨ Features
 
-### Android 11+ (Android R, S, T, U)
-- Requires **"All Files Access"** (`MANAGE_EXTERNAL_STORAGE`) to serve `/storage/emulated/0/`.
-- On first launch, if you see "Storage Access Required":
-  1. Grants "Settings".
-  2. Toggle **"Allow access to manage all files"**.
-- **SAF Fallback**: If you deny the above, select "Use System Picker" to share a specific folder via Android's file picker.
+- **Blazing Speed**: Custom parallel TCP stream architecture capable of **25MB/s - 50MB/s** on standard 5GHz Wi-Fi.
+- **Zero Configuration**: Automatic device discovery using UDP broadcasting—just open the app and find nearby devices.
+- **Premium Minimalist UI**: A clean, distraction-free interface with smooth animations and a "mobile-first" aesthetic.
+- **Background Persistence**: Integrated with Android Foreground Services; transfers continue reliably even when the app is minimized or the screen is off.
+- **Intelligent Notifications**: Real-time progress bars and "Smart Disconnect" alerts that keep you informed without being intrusive.
+- **Privacy First**: Transfers happen exclusively over your local network. No cloud, no tracking, and no internet required.
+- **Robust Recovery**: Automated handling of network interruptions with clear "Retry" options for failed transfers.
 
-## Setup Instructions
+## 🛠️ Technology Stack
 
-1. **Prerequisites**
-   - Flutter SDK (3.10+)
-   - Android Device (Android 8+)
-   - USB Debugging enabled
+- **Framework**: Flutter (Dart)
+- **Protocol**: Custom TCP Control Channel + Parallel Data Sockets
+- **Discovery**: UDP Multicast/Broadcast
+- **State Management**: Flutter Riverpod 3.0 (Notifiers & Providers)
+- **Background Logic**: `flutter_foreground_task` & Isolate-based file I/O
 
-2. **Installation**
+## 🚀 Getting Started
+
+### Prerequisites
+- Flutter SDK (3.10.0 or higher)
+- Android Device (Android 8.0+)
+- Both devices connected to the **same Wi-Fi network**
+
+### Installation
+1. Clone the repository:
    ```bash
-   git clone <repo>
-   cd wifi_ftp
+   git clone https://github.com/HimanshuJadav77/FastShare.git
+   ```
+2. Install dependencies:
+   ```bash
+   cd FastShare
    flutter pub get
    ```
-
-3. **Running the App**
-   Connect your Android device and run:
+3. Run the application:
    ```bash
    flutter run
    ```
 
-## Usage
-1. Connect phone and PC to the **same Wi-Fi network**.
-2. Open the app and grant **Storage Permissions** when prompted.
-3. Select a **Shared Folder**.
-4. Tap **START SERVER**.
-5. On your PC, open File Explorer or FileZilla.
-6. Enter the **FTP URL** displayed (e.g., `ftp://192.168.1.5:2221`).
-7. Enter the **Username** and **Password** shown on the screen.
+## 📱 Permissions
+To ensure high-speed access to all your media, the app requires:
+- **All Files Access**: (Android 11+) For serving and saving files directly to storage.
+- **Location**: Required by Android for Wi-Fi SSID discovery.
+- **Notifications**: For background transfer monitoring.
 
-## Troubleshooting
-- **Connection Refused**: Ensure both devices are on the same Wi-Fi. Check if firewall is blocking port 2221.
-- **Permission Denied**: Go to Android Settings -> Apps -> Wi-Fi FTP -> Permissions and enable Storage access manually if needed.
-- **Slow Speed**: Use 5GHz Wi-Fi for best performance.
+## 🤝 Contributing
+Contributions are welcome! If you have ideas for improving transfer speeds or enhancing the UI, feel free to open a Pull Request.
 
-## Dependencies
-- `ftp_server`
-- `network_info_plus`
-- `permission_handler`
-- `path_provider`
-- `qr_flutter`
-- `device_info_plus`
+---
+Developed with ❤️ by [Himanshu Jadav](https://github.com/HimanshuJadav77)

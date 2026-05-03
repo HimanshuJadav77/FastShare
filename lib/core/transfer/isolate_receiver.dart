@@ -40,7 +40,9 @@ class ReceiverOfferMsg {
   final String id;
   final String name;
   final int size;
-  const ReceiverOfferMsg(this.id, this.name, this.size);
+  final int batchIndex;
+  final int batchTotal;
+  const ReceiverOfferMsg(this.id, this.name, this.size, this.batchIndex, this.batchTotal);
 }
 
 class ReceiverTelemetryMsg {
@@ -254,31 +256,33 @@ Future<void> isolateReceiverEntry(ReceiverIsolateArgs args) async {
               if (type == 'OFFER_FILE') {
                 final id = h['id'] as String;
                 final name = h['name'] as String;
-                final size = (h['size'] as num).toInt();
+                  final size = (h['size'] as num).toInt();
+                  final bIndex = (h['batch_index'] as num?)?.toInt() ?? 1;
+                  final bTotal = (h['batch_total'] as num?)?.toInt() ?? 1;
 
-                final dir = Directory(saveDir);
-                if (!dir.existsSync()) dir.createSync(recursive: true);
+                  final dir = Directory(saveDir);
+                  if (!dir.existsSync()) dir.createSync(recursive: true);
 
-                final file = File('${dir.path}/$name');
-                final exists = file.existsSync();
-                int startChunk = 0;
-                
-                if (exists && autoResume) {
-                   startChunk = file.lengthSync() ~/ args.chunkSize;
-                   if (startChunk * args.chunkSize > size) {
-                     startChunk = 0;
+                  final file = File('${dir.path}/$name');
+                  final exists = file.existsSync();
+                  int startChunk = 0;
+                  
+                  if (exists && autoResume) {
+                     startChunk = file.lengthSync() ~/ args.chunkSize;
+                     if (startChunk * args.chunkSize > size) {
+                       startChunk = 0;
+                       file.deleteSync();
+                     }
+                  } else if (exists) {
                      file.deleteSync();
-                   }
-                } else if (exists) {
-                   file.deleteSync();
-                }
+                  }
 
-                if (!openFiles.containsKey(id)) {
-                  openFiles[id] = file.openSync(mode: (exists && autoResume) ? FileMode.append : FileMode.write);
-                  fileSizes[id] = size;
-                  telemetryBytes[id] = startChunk * args.chunkSize;
-                  args.replyPort.send(ReceiverOfferMsg(id, name, size));
-                }
+                  if (!openFiles.containsKey(id)) {
+                    openFiles[id] = file.openSync(mode: (exists && autoResume) ? FileMode.append : FileMode.write);
+                    fileSizes[id] = size;
+                    telemetryBytes[id] = startChunk * args.chunkSize;
+                    args.replyPort.send(ReceiverOfferMsg(id, name, size, bIndex, bTotal));
+                  }
 
                 socket.write('{"type":"START_FROM","index":$startChunk}\n');
                 await socket.flush();
@@ -299,7 +303,7 @@ Future<void> isolateReceiverEntry(ReceiverIsolateArgs args) async {
       } finally {
         inProcess = false;
       }
-    };
+    }
 
     // Auto-throttle read window based on RAM
     sub = socket.listen(

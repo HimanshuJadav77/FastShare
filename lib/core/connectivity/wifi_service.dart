@@ -6,7 +6,8 @@ import 'package:wifi_ftp/core/data/models/device_model.dart';
 import 'package:network_info_plus/network_info_plus.dart';
 
 class WifiService {
-  final int discoveryPort = 45555;
+  int discoveryPort = 45555;
+  int broadcastIntervalSeconds = 1;
   RawDatagramSocket? _socket;
   Timer? _broadcastTimer;
   Timer? _cleanupTimer;
@@ -144,7 +145,7 @@ class WifiService {
     });
 
     // Start periodic broadcasting
-    _broadcastTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+    _broadcastTimer = Timer.periodic(Duration(seconds: broadcastIntervalSeconds), (_) {
       final broadcastModel = DeviceModel(
         deviceId: localDevice.deviceId,
         deviceName: localDevice.deviceName,

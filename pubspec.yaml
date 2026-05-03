@@ -11,8 +11,8 @@ dependencies:
     sdk: flutter
 
   # State Management
-  flutter_riverpod: ^2.5.1
-  riverpod_annotation: ^2.3.5
+  flutter_riverpod: ^3.1.0
+  riverpod_annotation: ^4.0.0
 
   # Navigation
   go_router: ^14.2.0
@@ -38,20 +38,21 @@ dependencies:
 
   # UI
   qr_flutter: ^4.1.0
-  mobile_scanner: ^5.1.1
   cupertino_icons: ^1.0.6
   google_fonts: ^6.2.1
-  flutter_blue_plus: ^2.2.1
-  wifi_iot: ^0.3.19+2
   open_filex: ^4.7.0
+  flutter_foreground_task: ^9.2.2
+  flutter_local_notifications: ^21.0.0
+  storage_space: ^1.1.2
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^3.0.0
-  build_runner: ^2.4.9
-  riverpod_generator: ^2.4.0
+  build_runner: ^2.15.0
+  riverpod_generator: ^4.0.0+1
   flutter_launcher_icons: ^0.14.4
+  custom_lint: ^0.8.1
 
 flutter:
   uses-material-design: true

@@ -55,9 +55,10 @@ class _TransferDashboardState extends ConsumerState<TransferDashboard> {
       if (peerIp == null) return;
 
       _conn.setTransferring();
-      final queue = ref.read(transferQueueProvider);
       final newItems = <TransferItem>[];
-      for (final p in paths) {
+      final pathsList = paths.toList();
+      for (int i = 0; i < pathsList.length; i++) {
+        final p = pathsList[i];
         final f = File(p);
         if (!f.existsSync()) continue;
         newItems.add(TransferItem(
@@ -67,11 +68,15 @@ class _TransferDashboardState extends ConsumerState<TransferDashboard> {
           direction: TransferDirection.sending,
           status: TransferItemStatus.waiting,
           localFile: f,
+          batchIndex: i + 1,
+          batchTotal: pathsList.length,
         ));
       }
       if (newItems.isNotEmpty) {
-        queue.addItems(newItems);
-        _ft.sendFiles(peerIp, newItems);
+        ref.read(transferQueueProvider.notifier).addItems(newItems);
+        _ft.setPeerIp(peerIp);
+        _conn.sendSessionFiles(newItems);
+        _ft.processQueue();
       }
     } finally {
       if (mounted) setState(() => _isPicking = false);
@@ -80,11 +85,27 @@ class _TransferDashboardState extends ConsumerState<TransferDashboard> {
 
   @override
   Widget build(BuildContext context) {
-    // Only rebuilds when list structure changes (add/complete/fail) — not on every byte
     final conn = ref.watch(appConnectionProvider);
-    final queue = ref.watch(transferQueueProvider);
     final ext = context.appColors;
-    final allItems = queue.allSortedItems;
+    // Watch the queue state — this correctly triggers rebuilds when items change.
+    final queueState = ref.watch(transferQueueProvider);
+    final currentFilter = ref.watch(transferFilterProvider);
+
+    // Apply filtering (Exhaustive switch)
+    final filteredItems = switch (currentFilter) {
+      TransferFilter.all => queueState,
+      TransferFilter.pending => queueState.where((i) => i.status == TransferItemStatus.waiting || i.status == TransferItemStatus.transferring || i.status == TransferItemStatus.paused).toList(),
+      TransferFilter.completed => queueState.where((i) => i.status == TransferItemStatus.completed).toList(),
+      TransferFilter.cancelled => queueState.where((i) => i.status == TransferItemStatus.failed || i.isCancelled).toList(),
+    };
+
+    // Compute sorted order: Active > Pending > Failed > Completed
+    final allItems = [
+      ...filteredItems.where((i) => i.status == TransferItemStatus.transferring),
+      ...filteredItems.where((i) => i.status == TransferItemStatus.waiting || i.status == TransferItemStatus.paused),
+      ...filteredItems.where((i) => i.status == TransferItemStatus.failed),
+      ...filteredItems.where((i) => i.status == TransferItemStatus.completed),
+    ];
 
     return Scaffold(
       extendBodyBehindAppBar: true,
@@ -102,7 +123,9 @@ class _TransferDashboardState extends ConsumerState<TransferDashboard> {
                     children: [
                       SizedBox(height: FsAppBar.bodyTopPadding(context)),
                       _SummaryHeader(ext: ext),
-                      const SizedBox(height: 24),
+                      const SizedBox(height: 20),
+                      _FilterChips(ext: ext),
+                      const SizedBox(height: 12),
                       Expanded(
                         child: allItems.isEmpty
                             ? _buildEmptyState(ext)
@@ -114,6 +137,8 @@ class _TransferDashboardState extends ConsumerState<TransferDashboard> {
                                   item: allItems[i], ext: ext, index: i,
                                   onPause: () => _pauseOrResume(allItems[i]),
                                   onCancel: () => _cancel(allItems[i]),
+                                  onResume: () => _resume(allItems[i]),
+                                  onRetry: () => _retry(allItems[i]),
                                 ),
                               ),
                       ),
@@ -183,19 +208,65 @@ class _TransferDashboardState extends ConsumerState<TransferDashboard> {
         _conn.sendTransferControl('PAUSE_TRANSFER', item.id);
       }
     } else {
-      // For receiving, we delegate to the queue
-      final q = ref.read(transferQueueProvider);
-      if (item.isPaused) { q.resumeItem(item.id); } else { q.pauseItem(item.id); }
+      // Receiving side — update queue AND tell the sender device to stop sending
+      final q = ref.read(transferQueueProvider.notifier);
+      if (item.isPaused) {
+        q.resumeItem(item.id);
+        _conn.sendTransferControl('RESUME_TRANSFER', item.id);
+      } else {
+        q.pauseItem(item.id);
+        _conn.sendTransferControl('PAUSE_TRANSFER', item.id);
+      }
     }
   }
 
   void _cancel(TransferItem item) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Theme.of(ctx).scaffoldBackgroundColor,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text('Cancel Transfer?', style: TextStyle(fontWeight: FontWeight.bold)),
+        content: Text('Are you sure you want to cancel "${item.fileName}"? This cannot be undone.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text('Keep', style: TextStyle(color: Theme.of(context).primaryColor)),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              if (item.direction == TransferDirection.sending) {
+                _ft.cancelSender(item.id);
+                _conn.sendTransferControl('CANCEL_TRANSFER', item.id);
+              } else {
+                _conn.sendTransferControl('CANCEL_TRANSFER', item.id);
+                ref.read(transferQueueProvider.notifier).cancelItem(item.id);
+              }
+            },
+            child: const Text('Cancel Transfer', style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _resume(TransferItem item) {
+    // Queue for resume (preserves bytesTransferred), then process
+    ref.read(transferQueueProvider.notifier).queueForResume(item.id);
     if (item.direction == TransferDirection.sending) {
-      _ft.cancelSender(item.id);
-    } else {
-      ref.read(transferQueueProvider).cancelItem(item.id);
+      _ft.setPeerIp(_conn.connectedDevice!.ip);
+      _ft.processQueue();
     }
-    _conn.sendTransferControl('CANCEL_TRANSFER', item.id);
+  }
+
+  void _retry(TransferItem item) {
+    // Full retry from zero bytes
+    ref.read(transferQueueProvider.notifier).retryItem(item.id);
+    if (item.direction == TransferDirection.sending) {
+      _ft.setPeerIp(_conn.connectedDevice!.ip);
+      _ft.processQueue();
+    }
   }
 
   Widget _buildEmptyState(AppThemeExtension ext) => Center(
@@ -255,18 +326,21 @@ class _TransferDashboardState extends ConsumerState<TransferDashboard> {
   }
 }
 
-// ─── Summary header — rebuilds only when queue structure changes ───
-class _SummaryHeader extends StatelessWidget {
+// ─── Summary header — rich breakdown of send/receive queues ───
+class _SummaryHeader extends ConsumerWidget {
   final AppThemeExtension ext;
   const _SummaryHeader({required this.ext});
 
   @override
-  Widget build(BuildContext context) {
-    // This widget is inside a Consumer so it gets the queue rebuild signals
-    final queue = FileTransferService().telemetry;
-    final activeCount = queue.values
-        .where((n) => n.value.state == TelemetryState.active)
-        .length;
+  Widget build(BuildContext context, WidgetRef ref) {
+    final q = ref.watch(transferQueueProvider);
+    final notifier = ref.read(transferQueueProvider.notifier);
+
+    final activeSending = notifier.activeSendingCount;
+    final activeReceiving = notifier.activeReceivingCount;
+    final waitingSending = q.where((i) => i.direction == TransferDirection.sending && i.status == TransferItemStatus.waiting).length;
+    final waitingReceiving = q.where((i) => i.direction == TransferDirection.receiving && i.status == TransferItemStatus.waiting).length;
+    final totalActive = activeSending + activeReceiving;
 
     return Container(
       padding: const EdgeInsets.all(20),
@@ -275,29 +349,142 @@ class _SummaryHeader extends StatelessWidget {
         borderRadius: BorderRadius.circular(28),
         boxShadow: ext.antiGravityShadow,
       ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      totalActive > 0 ? 'Active Transfers' : 'Transfer Session',
+                      style: TextStyle(fontWeight: FontWeight.w900, fontSize: 18, color: Theme.of(context).colorScheme.onSurface),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      q.isEmpty ? 'No transfers yet' : '${q.length} file${q.length != 1 ? 's' : ''} in session',
+                      style: TextStyle(color: ext.textMuted, fontSize: 12, fontWeight: FontWeight.w500),
+                    ),
+                  ],
+                ),
+              ),
+              if (totalActive > 0) _AggregateSpeedBadge(ext: ext),
+            ],
+          ),
+          if (q.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(child: _QueueLane(
+                  icon: Icons.upload_rounded,
+                  label: 'Sending',
+                  active: activeSending,
+                  waiting: waitingSending,
+                  color: Theme.of(context).primaryColor,
+                  ext: ext,
+                )),
+                const SizedBox(width: 12),
+                Expanded(child: _QueueLane(
+                  icon: Icons.download_rounded,
+                  label: 'Receiving',
+                  active: activeReceiving,
+                  waiting: waitingReceiving,
+                  color: ext.success,
+                  ext: ext,
+                )),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _FilterChips extends ConsumerWidget {
+  final AppThemeExtension ext;
+  const _FilterChips({required this.ext});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final current = ref.watch(transferFilterProvider);
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
       child: Row(
         children: [
+          _chip(ref, 'All', TransferFilter.all, current == TransferFilter.all),
+          _chip(ref, 'Pending', TransferFilter.pending, current == TransferFilter.pending),
+          _chip(ref, 'Received', TransferFilter.completed, current == TransferFilter.completed),
+          _chip(ref, 'Cancelled', TransferFilter.cancelled, current == TransferFilter.cancelled),
+        ],
+      ),
+    );
+  }
+
+  Widget _chip(WidgetRef ref, String label, TransferFilter filter, bool active) {
+    return Padding(
+      padding: const EdgeInsets.only(right: 8),
+      child: AppAnimations.scaleOnTap(
+        onTap: () => ref.read(transferFilterProvider.notifier).setFilter(filter),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          decoration: BoxDecoration(
+            color: active ? Theme.of(ref.context).primaryColor : ext.textMuted.withValues(alpha: 0.1),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              color: active ? Colors.white : ext.textMuted,
+              fontWeight: active ? FontWeight.bold : FontWeight.w600,
+              fontSize: 12,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Compact sending or receiving lane display
+class _QueueLane extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final int active;
+  final int waiting;
+  final Color color;
+  final AppThemeExtension ext;
+
+  const _QueueLane({required this.icon, required this.label, required this.active, required this.waiting, required this.color, required this.ext});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.07),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, color: color, size: 16),
+          const SizedBox(width: 8),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                Text(label, style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.w800)),
                 Text(
-                  activeCount > 0 ? 'Active Transfers' : 'Transfer Session',
-                  style: TextStyle(
-                      fontWeight: FontWeight.w900,
-                      fontSize: 18,
-                      color: Theme.of(context).colorScheme.onSurface),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  '$activeCount item${activeCount != 1 ? 's' : ''} transferring',
-                  style: TextStyle(
-                      color: ext.textMuted, fontSize: 13, fontWeight: FontWeight.w500),
+                  active > 0
+                    ? '$active active${waiting > 0 ? ' • $waiting waiting' : ''}'
+                    : waiting > 0 ? '$waiting waiting' : 'idle',
+                  style: TextStyle(color: ext.textMuted, fontSize: 11),
                 ),
               ],
             ),
           ),
-          if (activeCount > 0) _AggregateSpeedBadge(ext: ext),
         ],
       ),
     );
@@ -374,6 +561,8 @@ class _TransferCard extends StatelessWidget {
   final int index;
   final VoidCallback onPause;
   final VoidCallback onCancel;
+  final VoidCallback onResume;
+  final VoidCallback onRetry;
 
   const _TransferCard({
     required this.item,
@@ -381,6 +570,8 @@ class _TransferCard extends StatelessWidget {
     required this.index,
     required this.onPause,
     required this.onCancel,
+    required this.onResume,
+    required this.onRetry,
   });
 
   @override
@@ -431,18 +622,46 @@ class _TransferCard extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(item.fileName,
-                          style: TextStyle(
-                              fontWeight: FontWeight.w900,
-                              fontSize: 15,
-                              letterSpacing: -0.3,
-                              color: Theme.of(context).colorScheme.onSurface),
-                          overflow: TextOverflow.ellipsis),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(item.fileName,
+                                style: TextStyle(
+                                    fontWeight: FontWeight.w900,
+                                    fontSize: 15,
+                                    letterSpacing: -0.3,
+                                    color: Theme.of(context).colorScheme.onSurface),
+                                overflow: TextOverflow.ellipsis),
+                          ),
+                          if (item.batchTotal > 1)
+                            Container(
+                              margin: const EdgeInsets.only(left: 8),
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: statusColor.withValues(alpha: 0.1),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(
+                                '${item.batchIndex} of ${item.batchTotal}',
+                                style: TextStyle(
+                                  color: statusColor,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
                       const SizedBox(height: 2),
                       Text(
-                        '${item.fileSizeFormatted} • ${item.direction.name.toUpperCase()}',
+                        item.canResume
+                            ? '${item.bytesTransferredFormatted} / ${item.fileSizeFormatted} • ${item.direction.name.toUpperCase()}'
+                            : (item.batchTotal > 1 
+                                ? '${item.batchIndex} of ${item.batchTotal} • ${item.fileSizeFormatted} • ${item.direction.name.toUpperCase()}'
+                                : '${item.fileSizeFormatted} • ${item.direction.name.toUpperCase()}'),
                         style: TextStyle(
-                            color: ext.textMuted, fontSize: 12, fontWeight: FontWeight.w600),
+                            color: item.canResume ? Theme.of(context).primaryColor.withValues(alpha: 0.7) : ext.textMuted,
+                            fontSize: 12, fontWeight: FontWeight.w600),
                       ),
                     ],
                   ),
@@ -464,6 +683,34 @@ class _TransferCard extends StatelessWidget {
                               fontSize: 12)),
                     ),
                   )
+                else if (item.status == TransferItemStatus.failed)
+                  Row(children: [
+                    AppAnimations.scaleOnTap(
+                      onTap: onRetry,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: Theme.of(context).primaryColor.withValues(alpha: 0.1),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.refresh_rounded, color: Theme.of(context).primaryColor, size: 14),
+                            const SizedBox(width: 4),
+                            Text('Retry', style: TextStyle(color: Theme.of(context).primaryColor, fontWeight: FontWeight.bold, fontSize: 12)),
+                          ],
+                        ),
+                      ),
+                    ),
+                    if (!item.isCancelled) ...[
+                      const SizedBox(width: 12),
+                      AppAnimations.scaleOnTap(
+                        onTap: onCancel,
+                        child: Icon(Icons.close_rounded, color: ext.danger, size: 24),
+                      ),
+                    ],
+                  ])
                 else
                   Row(children: [
                     AppAnimations.scaleOnTap(
@@ -472,11 +719,13 @@ class _TransferCard extends StatelessWidget {
                           item.isPaused ? Icons.play_arrow_rounded : Icons.pause_rounded,
                           color: ext.warning, size: 24),
                     ),
-                    const SizedBox(width: 12),
-                    AppAnimations.scaleOnTap(
-                      onTap: onCancel,
-                      child: Icon(Icons.close_rounded, color: ext.danger, size: 24),
-                    ),
+                    if (!item.isCancelled) ...[
+                      const SizedBox(width: 12),
+                      AppAnimations.scaleOnTap(
+                        onTap: onCancel,
+                        child: Icon(Icons.close_rounded, color: ext.danger, size: 24),
+                      ),
+                    ],
                   ]),
               ],
             ),

@@ -19,14 +19,14 @@ class HistoryScreen extends ConsumerWidget {
       body: Stack(
         children: [
           Positioned.fill(
-            child: history.records.isEmpty
+            child: history.isEmpty
                 ? _buildEmptyState(context, ext)
                 : ListView.separated(
                     padding: EdgeInsets.fromLTRB(20, topOffset, 20, 40),
-                    itemCount: history.records.length,
+                    itemCount: history.length,
                     separatorBuilder: (_, __) => const SizedBox(height: 12),
                     itemBuilder: (context, index) =>
-                        _buildHistoryCard(context, history.records[index], ext, index),
+                        _buildHistoryCard(context, history[index], ext, index),
                   ),
           ),
           FsAppBar(
@@ -110,7 +110,7 @@ class HistoryScreen extends ConsumerWidget {
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel', style: TextStyle(fontWeight: FontWeight.w600))),
           TextButton(
             onPressed: () {
-              ref.read(transferHistoryProvider).clear();
+              ref.read(transferHistoryProvider.notifier).clear();
               Navigator.pop(ctx);
             },
             child: Text('Clear All', style: TextStyle(color: context.appColors.danger, fontWeight: FontWeight.bold)),

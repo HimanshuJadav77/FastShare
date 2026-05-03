@@ -21,6 +21,10 @@ class SenderIsolateArgs {
   final int fileSize;
   final int chunkSize;
   final int parallelStreams;
+  /// Chunk index to resume from (0 = fresh start, >0 = continue after disconnect)
+  final int resumeFromChunk;
+  final int batchIndex;
+  final int batchTotal;
 
   const SenderIsolateArgs({
     required this.replyPort,
@@ -32,6 +36,9 @@ class SenderIsolateArgs {
     required this.fileSize,
     required this.chunkSize,
     required this.parallelStreams,
+    this.resumeFromChunk = 0,
+    this.batchIndex = 1,
+    this.batchTotal = 1,
   });
 }
 
@@ -77,9 +84,11 @@ Future<void> isolateSenderEntry(SenderIsolateArgs args) async {
     if (msg == SenderCmd.cancel) isCancelled = true;
   });
 
+  int bytesDone = 0;
+
   void sendError() {
     args.replyPort.send(SenderTelemetry(
-      fileId: args.fileId, bytesDone: 0, speedBps: 0, isError: true,
+      fileId: args.fileId, bytesDone: bytesDone, speedBps: 0, isError: true,
     ));
     cmdPort.close();
   }
@@ -106,6 +115,8 @@ Future<void> isolateSenderEntry(SenderIsolateArgs args) async {
         'name': args.fileName,
         'size': args.fileSize,
         'chunks': totalChunks,
+        'batch_index': args.batchIndex,
+        'batch_total': args.batchTotal,
       })}\n',
     );
     await controlSocket.flush();
@@ -115,7 +126,8 @@ Future<void> isolateSenderEntry(SenderIsolateArgs args) async {
   }
 
   // ── 2. Wait for START_FROM ──
-  int startIndex = 0;
+  // Seed from local knowledge (resume after disconnect), then let receiver override with its authoritative value.
+  int startIndex = args.resumeFromChunk;
   try {
     final completer = Completer<int>();
     final lineBuf = StringBuffer();
@@ -167,7 +179,7 @@ Future<void> isolateSenderEntry(SenderIsolateArgs args) async {
   }
 
   int chunkIndex = startIndex;
-  int bytesDone = startIndex * args.chunkSize;
+  bytesDone = startIndex * args.chunkSize;
   int socketIdx = 0;
 
   // Flush IOSink every this many bytes — prevents unbounded buffering without

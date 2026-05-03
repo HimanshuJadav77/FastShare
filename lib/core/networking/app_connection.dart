@@ -7,6 +7,9 @@ import 'package:wifi_ftp/core/connectivity/discovery_service.dart';
 import 'package:wifi_ftp/core/networking/tcp_server.dart';
 import 'package:wifi_ftp/core/transfer/file_transfer_service.dart';
 import 'package:wifi_ftp/core/transfer/transfer_queue.dart';
+import 'package:wifi_ftp/core/transfer/background_service.dart';
+import 'package:wifi_ftp/core/providers.dart';
+import 'package:wifi_ftp/main.dart';
 
 enum ConnectionState { idle, discovering, connecting, connected, transferring, disconnected }
 
@@ -36,14 +39,19 @@ class AppConnection extends ChangeNotifier {
     orchestrator.tcpServer.onPeerDisconnected = _onIncomingPeerDisconnected;
     orchestrator.tcpServer.onControlMessage = (json) {
       final type = json['type'];
+      final id = json['id'] as String? ?? '';
       if (type == 'PAUSE_TRANSFER') {
-        try { _queue.pauseItem(json['id']); } catch (_) {}
+        // Remote device asked us to pause — stop the sender isolate if we are sending
+        try { FileTransferService().pauseSender(id); } catch (_) {}
+        // Also update queue state so UI reflects paused on this side
+        try { _queue.pauseItem(id); } catch (_) {}
       } else if (type == 'RESUME_TRANSFER') {
-        try { _queue.resumeItem(json['id']); } catch (_) {}
+        try { FileTransferService().resumeSender(id); } catch (_) {}
+        try { _queue.resumeItem(id); } catch (_) {}
       } else if (type == 'CANCEL_TRANSFER') {
         try {
-          final itemName = _queue.items.firstWhere((i) => i.id == json['id']).fileName;
-          _queue.cancelItem(json['id']);
+          final itemName = appProviderContainer.read(transferQueueProvider).firstWhere((i) => i.id == id).fileName;
+          _queue.cancelItem(id);
           _showCancelledPopup(itemName);
         } catch (_) {}
       }
@@ -66,7 +74,9 @@ class AppConnection extends ChangeNotifier {
   // Services
   final DiscoveryOrchestrator orchestrator = DiscoveryOrchestrator();
   final FileTransferService fileTransfer = FileTransferService();
-  final TransferQueue _queue = TransferQueue();
+
+  TransferQueueNotifier get _queue => appProviderContainer.read(transferQueueProvider.notifier);
+
 
   // Getters
   ConnectionState get state => _state;
@@ -128,19 +138,40 @@ class AppConnection extends ChangeNotifier {
         try {
           final json = jsonDecode(trimmed);
           final type = json['type'];
+          final id = json['id'] as String? ?? '';
           if (type == 'DISCONNECT') {
             debugPrint('[CONNECTION] Remote device sent DISCONNECT');
             _onRemoteDisconnect();
           } else if (type == 'PAUSE_TRANSFER') {
-            try { _queue.pauseItem(json['id']); } catch (_) {}
+            // Remote asked us to stop sending — pause the sender isolate
+            try { FileTransferService().pauseSender(id); } catch (_) {}
+            try { _queue.pauseItem(id); } catch (_) {}
           } else if (type == 'RESUME_TRANSFER') {
-            try { _queue.resumeItem(json['id']); } catch (_) {}
+            try { FileTransferService().resumeSender(id); } catch (_) {}
+            try { _queue.resumeItem(id); } catch (_) {}
           } else if (type == 'CANCEL_TRANSFER') {
             try {
-              final itemName = _queue.items.firstWhere((i) => i.id == json['id']).fileName;
-              _queue.cancelItem(json['id']);
+              final itemName = appProviderContainer.read(transferQueueProvider).firstWhere((i) => i.id == id).fileName;
+              _queue.cancelItem(id);
               _showCancelledPopup(itemName);
             } catch (_) {}
+          } else if (type == 'SESSION_FILES') {
+            // Peer is sending us a list of files we are about to receive
+            final files = json['files'] as List<dynamic>? ?? [];
+            for (final f in files) {
+              try {
+                final item = TransferItem(
+                  id: f['id'],
+                  fileName: f['name'],
+                  fileSize: f['size'],
+                  batchIndex: f['batch_index'],
+                  batchTotal: f['batch_total'],
+                  direction: TransferDirection.receiving,
+                  status: TransferItemStatus.waiting,
+                );
+                _queue.addItem(item);
+              } catch (_) {}
+            }
           }
         } catch (_) {}
       }
@@ -153,6 +184,22 @@ class AppConnection extends ChangeNotifier {
       _controlSocket!.write('${jsonEncode({'type': type, 'id': id})}\n');
     } catch (e) {
       debugPrint('[CONNECTION] Failed to send control msg: $e');
+    }
+  }
+
+  void sendSessionFiles(List<TransferItem> items) {
+    if (_controlSocket == null) return;
+    try {
+      final filesJson = items.map((i) => {
+        'id': i.id,
+        'name': i.fileName,
+        'size': i.fileSize,
+        'batch_index': i.batchIndex,
+        'batch_total': i.batchTotal,
+      }).toList();
+      _controlSocket!.write('${jsonEncode({'type': 'SESSION_FILES', 'files': filesJson})}\n');
+    } catch (e) {
+      debugPrint('[CONNECTION] Failed to send session files: $e');
     }
   }
 
@@ -199,10 +246,16 @@ class AppConnection extends ChangeNotifier {
     _controlSocket = null;
     _connectedDevice = null;
     
-    // Pause all active sender isolates gracefully so transfers can resume later
-    try { fileTransfer.pauseAllSenders(); } catch (_) {}
+    // Mark all active transfers as failed (preserves bytes for resume)
+    final queue = appProviderContainer.read(transferQueueProvider);
+    for (final item in queue) {
+      if (item.status == TransferItemStatus.transferring) {
+        _queue.failItem(item.id);
+      }
+    }
 
     fileTransfer.stopReceiver();
+    BackgroundService().showDisconnectionNotification(wasDevice);
     _setState(ConnectionState.disconnected);
     debugPrint('[CONNECTION] Remote disconnected: $wasDevice');
   }
@@ -493,6 +546,15 @@ class AppConnection extends ChangeNotifier {
     _connectedDevice = null;
     
     fileTransfer.stopReceiver();
+
+    // Reset active items to failed for resume later
+    final queue = appProviderContainer.read(transferQueueProvider);
+    for (final item in queue) {
+      if (item.status == TransferItemStatus.transferring) {
+        _queue.failItem(item.id);
+      }
+    }
+
     _setState(ConnectionState.disconnected);
   }
 

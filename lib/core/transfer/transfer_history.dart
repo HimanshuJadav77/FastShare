@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 /// A single completed transfer record
 class TransferRecord {
@@ -63,20 +64,20 @@ class TransferRecord {
   }
 }
 
-/// Persistent transfer history — saved to JSON file
-class TransferHistory extends ChangeNotifier {
-  static final TransferHistory _instance = TransferHistory._internal();
-  factory TransferHistory() => _instance;
-  TransferHistory._internal();
 
-  final List<TransferRecord> _records = [];
-  List<TransferRecord> get records => List.unmodifiable(_records);
+/// Persistent transfer history — saved to JSON file
+class TransferHistoryNotifier extends Notifier<List<TransferRecord>> {
+  @override
+  List<TransferRecord> build() {
+    return [];
+  }
+  
   bool _loaded = false;
 
   List<TransferRecord> get sentRecords =>
-      _records.where((r) => r.direction == 'sent').toList();
+      state.where((r) => r.direction == 'sent').toList();
   List<TransferRecord> get receivedRecords =>
-      _records.where((r) => r.direction == 'received').toList();
+      state.where((r) => r.direction == 'received').toList();
 
   Future<void> load() async {
     if (_loaded) return;
@@ -85,20 +86,21 @@ class TransferHistory extends ChangeNotifier {
       if (await file.exists()) {
         final content = await file.readAsString();
         final list = jsonDecode(content) as List;
-        _records.clear();
+        final List<TransferRecord> loaded = [];
         for (final e in list) {
           if (e is Map<String, dynamic>) {
             try {
-              _records.add(TransferRecord.fromJson(e));
+              loaded.add(TransferRecord.fromJson(e));
             } catch (err) {
               debugPrint('[HISTORY] Skip invalid record: $err');
             }
           }
         }
-        _records.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+        loaded.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+        state = loaded;
       }
       _loaded = true;
-      debugPrint('[HISTORY] Loaded ${_records.length} records');
+      debugPrint('[HISTORY] Loaded ${state.length} records');
     } catch (e) {
       debugPrint('[HISTORY] Load error: $e');
       _loaded = true;
@@ -107,9 +109,9 @@ class TransferHistory extends ChangeNotifier {
 
   Future<void> addRecord(TransferRecord record) async {
     await load(); // Ensure we have the existing records before adding/saving
-    _records.insert(0, record);
+    final newState = [record, ...state];
     debugPrint('[HISTORY] Added: ${record.direction} ${record.fileName}');
-    notifyListeners();
+    state = newState;
     await _save();
   }
 
@@ -117,30 +119,28 @@ class TransferHistory extends ChangeNotifier {
   Future<void> deleteRecord(TransferRecord recordToRemove) async {
     await load();
 
-    // Remove by matching filename and exact timestamp
-    _records.removeWhere(
+    final newState = state.where(
       (r) =>
-          r.fileName == recordToRemove.fileName &&
-          r.timestamp == recordToRemove.timestamp,
-    );
+          !(r.fileName == recordToRemove.fileName &&
+            r.timestamp == recordToRemove.timestamp),
+    ).toList();
 
     debugPrint('[HISTORY] Deleted: ${recordToRemove.fileName}');
-    notifyListeners();
+    state = newState;
     await _save();
   }
 
   Future<void> clear() async {
     await load();
-    _records.clear();
-    notifyListeners();
+    state = [];
     await _save();
   }
 
   Future<void> _save() async {
     try {
       final file = await _getHistoryFile();
-      final json = jsonEncode(_records.map((r) => r.toJson()).toList());
-      await file.writeAsString(json);
+      final jsonStr = jsonEncode(state.map((r) => r.toJson()).toList());
+      await file.writeAsString(jsonStr);
     } catch (e) {
       debugPrint('[HISTORY] Save error: $e');
     }

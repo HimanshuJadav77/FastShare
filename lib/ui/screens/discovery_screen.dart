@@ -25,13 +25,13 @@ class _DiscoveryScreenState extends ConsumerState<DiscoveryScreen> {
   void initState() {
     super.initState();
     _connection = ref.read(appConnectionProvider);
-    ref.read(transferHistoryProvider).load();
+    ref.read(transferHistoryProvider.notifier).load();
 
     // Don't disconnect here - if connected, DiscoveryScreen will show connecting/connected states
     // but typically HomeScreen redirects to /dashboard if connected.
 
     _connection.addListener(_onConnectionStateChanged);
-    _startDiscovery();
+    // Scanning is now explicit via user action.
   }
 
   void _onConnectionStateChanged() {
@@ -73,7 +73,7 @@ class _DiscoveryScreenState extends ConsumerState<DiscoveryScreen> {
       deviceName: deviceName,
       deviceType: deviceType,
       ip: '',
-      port: 45556,
+      port: ref.read(settingsProvider).controlPort,
     );
 
     await _connection.startDiscovery(localDevice);
@@ -145,6 +145,47 @@ class _DiscoveryScreenState extends ConsumerState<DiscoveryScreen> {
                   )
                 : null,
           ),
+          
+          // ─── Scan Control FAB ───
+          Positioned(
+            bottom: 30, left: 24, right: 24,
+            child: AppAnimations.scaleOnTap(
+              onTap: () {
+                if (_connection.state == app.ConnectionState.discovering) {
+                  _connection.stopDiscovery();
+                } else {
+                  _startDiscovery();
+                }
+                setState(() {}); // refresh the UI explicitly
+              },
+              child: Container(
+                height: 60,
+                decoration: BoxDecoration(
+                  gradient: _connection.state == app.ConnectionState.discovering 
+                      ? LinearGradient(colors: [ext.warning, ext.warning.withValues(alpha: 0.8)])
+                      : ext.primaryGradient,
+                  borderRadius: BorderRadius.circular(20),
+                  boxShadow: [BoxShadow(
+                    color: (_connection.state == app.ConnectionState.discovering ? ext.warning : Theme.of(context).primaryColor).withValues(alpha: 0.3),
+                    blurRadius: 20, offset: const Offset(0, 10),
+                  )],
+                ),
+                child: Center(
+                  child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                    Icon(
+                      _connection.state == app.ConnectionState.discovering ? Icons.stop_rounded : Icons.radar_rounded, 
+                      color: Colors.white, size: 24
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      _connection.state == app.ConnectionState.discovering ? 'Stop Scan' : 'Start Scan', 
+                      style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.bold)
+                    ),
+                  ]),
+                ),
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -209,11 +250,20 @@ class _DiscoveryScreenState extends ConsumerState<DiscoveryScreen> {
         children: [
           Icon(Icons.radar_rounded, size: 80, color: Theme.of(context).primaryColor.withValues(alpha: 0.2)),
           const SizedBox(height: 32),
-          Text('Scanning for Devices', style: context.text.titleMedium?.copyWith(fontWeight: FontWeight.w900, color: Theme.of(context).colorScheme.onSurface)),
+          Text(
+            _connection.state == app.ConnectionState.discovering ? 'Scanning for Devices...' : 'Ready to Scan', 
+            style: context.text.titleMedium?.copyWith(fontWeight: FontWeight.w900, color: Theme.of(context).colorScheme.onSurface)
+          ),
           const SizedBox(height: 12),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 40),
-            child: Text('Make sure both devices have Bluetooth and Wi-Fi enabled.', textAlign: TextAlign.center, style: TextStyle(color: ext.textMuted, fontSize: 14, height: 1.5)),
+            child: Text(
+              _connection.state == app.ConnectionState.discovering 
+                ? 'Make sure both devices have Bluetooth and Wi-Fi enabled.'
+                : 'Tap "Start Scan" to discover nearby devices.', 
+              textAlign: TextAlign.center, 
+              style: TextStyle(color: ext.textMuted, fontSize: 14, height: 1.5)
+            ),
           ),
         ],
       ),
